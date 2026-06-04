@@ -1,6 +1,7 @@
 mod logger;
 mod market_data;
 mod messages;
+mod prediction;
 mod state;
 mod ui;
 mod worker;
@@ -17,6 +18,12 @@ use state::AppState;
 use worker::PolymarketWorker;
 use worker_config::PollConfig;
 use ui::PolymarketDashboardApp;
+use prediction::{
+    PredictionStore,
+    PredictionEngine,
+    PredictionService,
+};
+use prediction::strategies::HypeReversionStrategy;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -27,6 +34,13 @@ async fn main() -> anyhow::Result<()> {
     // Shared state (single source of truth)
     // ------------------------------------------------------------------
     let app_state = std::sync::Arc::new(AppState::new());
+
+    // ------------------------------------------------------------------
+    // Prediction state
+    // ------------------------------------------------------------------
+    let prediction_state = std::sync::Arc::new(
+        PredictionStore::new()
+    );
 
     // ------------------------------------------------------------------
     // Communication channels
@@ -113,11 +127,33 @@ async fn main() -> anyhow::Result<()> {
                 }
             });
 
+            // ------------------------------------------------------------------
+            // Start prediction subsystem
+            // ------------------------------------------------------------------
+            let prediction_store = std::sync::Arc::clone(&prediction_state);
+            let prediction_ctx = cc.egui_ctx.clone();
+
+            tokio::spawn(async move {
+                let engine = PredictionEngine::new()
+                    .with_strategy(HypeReversionStrategy::new());
+
+                let service = PredictionService::new(
+                    prediction_store,
+                    engine,
+                    prediction_ctx,
+                );
+
+                if let Err(e) = service.run().await {
+                    tracing::error!("Prediction service exited: {e:#}");
+                }
+            });
+
             Ok(Box::new(PolymarketDashboardApp::new(
                 cc,
                 cmd_tx,
                 event_rx,
                 app_state,
+                prediction_state,
                 poll_config,
             )))
         }),

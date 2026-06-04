@@ -134,6 +134,59 @@ impl PolymarketDashboardApp {
                 }
 
                 // ----------------------------------------------------------------
+                // Prediction information
+                // ----------------------------------------------------------------
+                if let Some(pred) =
+                    self.prediction_state.signals.get(&window.timestamp_5m)
+                {
+                    if let Some(signal) =
+                        pred.active_signal.as_ref()
+                    {
+                        ui.add_space(6.0);
+
+                        panel_frame().show(ui, |ui| {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(
+                                    format!(
+                                        "PREDICTION: {:?}",
+                                        signal.side
+                                    )
+                                );
+
+                                ui.separator();
+
+                                ui.label(
+                                    format!(
+                                        "CONF {:.1}%",
+                                        signal.confidence
+                                    )
+                                );
+
+                                ui.separator();
+
+                                ui.label(
+                                    format!(
+                                        "ENTRY {}",
+                                        signal.target_entry
+                                    )
+                                );
+
+                                ui.separator();
+
+                                ui.label(
+                                    format!(
+                                        "EXIT {}",
+                                        signal.target_exit
+                                    )
+                                );
+                            });
+
+                            ui.label(&signal.reason);
+                        });
+                    }
+                }
+
+                // ----------------------------------------------------------------
                 // Order columns
                 // ----------------------------------------------------------------
                 if window.is_expanded {

@@ -25,6 +25,7 @@ pub mod theme;
 pub mod widgets;
 pub mod window_matrix;
 
+use std::sync::Arc;
 use std::collections::HashSet;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -40,6 +41,7 @@ use crate::state::{
 };
 use crate::ui::theme::{Theme, apply_dashboard_theme};
 use crate::worker_config::{Queue, SharedPollConfig};
+use crate::prediction::PredictionStore;
 
 // ---------------------------------------------------------------------------
 // Interval input helpers
@@ -76,6 +78,9 @@ impl IntervalInputs {
 pub struct PolymarketDashboardApp {
     // ── shared state (single source of truth) ──────────────────────────────
     pub state: SharedAppState,
+
+    // ── prediction state ───────────────────────────────────────────────────
+    pub prediction_state: Arc<PredictionStore>,
 
     // ── channels ───────────────────────────────────────────────────────────
     pub cmd_tx: Sender<UiCommand>,
@@ -119,12 +124,14 @@ impl PolymarketDashboardApp {
         cmd_tx: Sender<UiCommand>,
         event_rx: Receiver<WorkerEvent>,
         state: SharedAppState,
+        prediction_state: Arc<PredictionStore>,
         poll_config: SharedPollConfig,
     ) -> Self {
         let bearer_token = std::env::var("API_BEARER_TOKEN").unwrap_or_default();
 
         Self {
             state,
+            prediction_state,
             cmd_tx,
             event_rx,
             bearer_token,

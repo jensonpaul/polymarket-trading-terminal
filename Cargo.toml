@@ -69,6 +69,7 @@ alloy = { version = "1.6.3", default-features = false, features = [
     "signers",
     "sol-types"
 ] }
+chrono = { version = "0.4.44", features = ["serde"] }
 
 # gRPC
 tonic = "0.7.2"
