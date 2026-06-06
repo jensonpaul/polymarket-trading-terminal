@@ -11,6 +11,7 @@ pub mod state;
 pub mod statistics;
 pub mod storage;
 pub mod strategy;
+pub mod window_state;
 
 pub mod strategies;
 
@@ -25,3 +26,4 @@ pub use state::*;
 pub use statistics::*;
 pub use storage::*;
 pub use strategy::*;
+pub use window_state::*;

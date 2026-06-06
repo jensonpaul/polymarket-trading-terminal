@@ -1,29 +1,25 @@
-//! # Hype Reversion Strategy
+//! # Trend Follow Strategy
 //!
-//! Mean-reversion play on Polymarket BTC UP/DOWN 5-minute markets.
+//! Momentum play on Polymarket BTC UP/DOWN 5-minute markets.
 //!
 //! ## Core Thesis
 //!
-//! When BTC makes a clean, directional move the crowd overshoots: the token
-//! aligned with BTC's direction gets bid up beyond fair value while the
-//! opposite token is ignored.  As the window progresses both tokens revert
-//! toward 0.5.  We buy the *suppressed* (counter-BTC) token.
-//!
-//! "Clean move" is measured by [`BtcTrend::efficiency_ratio`]: a high ER
-//! means the crowd had a coherent narrative to over-react to; a low ER
-//! (choppy BTC) gives the crowd nothing to latch onto.
+//! When BTC is making a clean, persistent directional move the aligned token
+//! continues to be bid up as traders pile in.  We trade *with* BTC's trend
+//! while the efficiency ratio and momentum persistence confirm the move is
+//! real rather than noise.
 //!
 //! ## What drives the signal
 //!
 //! | Dimension               | Role in this strategy                              |
 //! |-------------------------|----------------------------------------------------|
-//! | `side`                  | Determines which token is suppressed (opposite)    |
-//! | `distance_from_origin`  | Magnitude of the move — bigger → more crowd hype   |
-//! | `efficiency_ratio`      | Cleaner trend → stronger crowd over-reaction       |
-//! | `momentum_persistence`  | Longer-lasting trend → more ingrained crowd bias   |
-//! | `z_score`               | Extreme z-score → BTC unusually far out → snap-back likely |
-//! | `volatility_30s`        | High volatility → suppressed token could rebound fast |
-//! | `acceleration`          | Negative acceleration on an up-trend → trend fading → snap-back soon |
+//! | `side`                  | We trade the token that matches BTC's direction    |
+//! | `efficiency_ratio`      | High ER → clean trend → follow with conviction     |
+//! | `momentum_persistence`  | High persistence → trend has been sustained        |
+//! | `avg_distance`          | Large time-averaged move → crowd already committed |
+//! | `acceleration`          | Positive acceleration → trend accelerating → entry timing |
+//! | `volatility_30s`        | Very high vol may indicate chop disguised as trend |
+//! | `z_score`               | Extreme z in trend direction → strong positioning  |
 
 use rust_decimal::prelude::ToPrimitive;
 
@@ -37,25 +33,17 @@ use crate::prediction::{
 };
 
 #[derive(Debug, Default)]
-pub struct HypeReversionStrategy;
+pub struct ConvictionFollowStrategy;
 
-impl HypeReversionStrategy {
+impl ConvictionFollowStrategy {
     pub fn new() -> Self {
         Self
     }
-
-    /// Which token side is being suppressed by the crowd hype.
-    fn suppressed_side(btc_side: PredictionSide) -> PredictionSide {
-        match btc_side {
-            PredictionSide::Up   => PredictionSide::Down,
-            PredictionSide::Down => PredictionSide::Up,
-        }
-    }
 }
 
-impl PredictionStrategy for HypeReversionStrategy {
+impl PredictionStrategy for ConvictionFollowStrategy {
     fn name(&self) -> &'static str {
-        "hype_reversion"
+        "conviction_follow"
     }
 
     fn evaluate(
@@ -65,7 +53,7 @@ impl PredictionStrategy for HypeReversionStrategy {
         // BTC origin must be locked.
         let trend = MarketAnalyzer::btc_trend(ctx)?;
 
-        // Late-window: settlement risk outweighs reversion upside.
+        // Late-window: settlement risk outweighs trend-follow upside.
         if ctx.seconds_remaining <= 30 {
             return Some(PredictionSignal::no_trade(
                 "settlement window",
@@ -73,7 +61,14 @@ impl PredictionStrategy for HypeReversionStrategy {
             ));
         }
 
-        let target_side = Self::suppressed_side(trend.side);
+        let elapsed =
+            300u64.saturating_sub(ctx.seconds_remaining) as f64;
+
+        // Token on the same side as BTC's trend.
+        let target_side = trend.side;
+
+        let token_trend =
+            MarketAnalyzer::token_trend(ctx, target_side, elapsed)?;
 
         let target_token = match target_side {
             PredictionSide::Up => &ctx.polymarket.up,
@@ -86,20 +81,22 @@ impl PredictionStrategy for HypeReversionStrategy {
         }
 
         let reason = format!(
-            "hype_reversion \
+            "conviction_follow \
              btcSide={:?} dist={:.4} er={:.3} \
-             persist={:.2} z={:.2} accel={:.5} \
+             persist={:.2} avgDist={:.4} z={:.2} accel={:.5} \
              vol30={:.4} rangePos={:.2} \
-             suppressed={:?} entry={:.4}",
+             tokenDist={:.4} tokenImb={:.3} entry={:.4}",
             trend.side,
             trend.distance_from_origin_pct,
             trend.efficiency_ratio,
             trend.momentum_persistence,
+            trend.avg_distance_from_origin,
             trend.z_score,
             trend.acceleration,
             trend.volatility_30s,
             trend.range_position,
-            target_side,
+            token_trend.distance_from_origin_pct,
+            token_trend.imbalance,
             entry.to_f64().unwrap_or(0.0),
         );
 

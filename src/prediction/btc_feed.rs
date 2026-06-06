@@ -13,6 +13,7 @@ use crate::prediction::{
     BtcFeatures,
     BtcSample,
     RollingWindow,
+    WindowState,
 };
 
 pub mod proto {
@@ -33,16 +34,19 @@ pub struct BtcFeed {
     port: u16,
     window: Arc<RwLock<RollingWindow<BtcSample>>>,
     snapshot: SharedBtcSnapshot,
+    window_state: Arc<RwLock<WindowState>>,
 }
 
 impl BtcFeed {
     pub fn new(
         port: u16,
         snapshot: SharedBtcSnapshot,
+        window_state: Arc<RwLock<WindowState>>,
     ) -> Self {
         Self {
             port,
             snapshot,
+            window_state,
             window: Arc::new(RwLock::new(
                 RollingWindow::new(Duration::from_secs(300)),
             )),
@@ -51,6 +55,14 @@ impl BtcFeed {
 
     pub fn snapshot(&self) -> SharedBtcSnapshot {
         self.snapshot.clone()
+    }
+
+    pub async fn notify_window_start(&self, window_started_ms: u64) {
+        self.window_state.write().await.reset(window_started_ms);
+    }
+
+    pub async fn btc_origin_locked(&self) -> bool {
+        self.window_state.read().await.btc_origin_locked
     }
 
     pub async fn run(&self) {
@@ -68,34 +80,23 @@ impl BtcFeed {
         &self,
     ) -> anyhow::Result<OrderbookAggregatorClient<Channel>> {
         let addr = format!("http://[::1]:{}", self.port);
-
-        Ok(
-            OrderbookAggregatorClient::connect(addr)
-                .await?,
-        )
+        Ok(OrderbookAggregatorClient::connect(addr).await?)
     }
 
-    async fn run_connection(
-        &self,
-    ) -> anyhow::Result<()> {
+    async fn run_connection(&self) -> anyhow::Result<()> {
         let mut client = self.connect().await?;
 
         info!("btc grpc connected");
 
-        let request =
-            tonic::Request::new(proto::Empty {});
+        let request = tonic::Request::new(proto::Empty {});
 
         let mut stream = client
             .book_summary(request)
             .await?
             .into_inner();
 
-        while let Some(summary) =
-            stream.message().await?
-        {
-            if summary.bids.is_empty()
-                || summary.asks.is_empty()
-            {
+        while let Some(summary) = stream.message().await? {
+            if summary.bids.is_empty() || summary.asks.is_empty() {
                 continue;
             }
 
@@ -124,26 +125,27 @@ impl BtcFeed {
             let price = (bid_vwap + ask_vwap) / 2.0;
 
             let timestamp_ms =
-                chrono::Utc::now()
-                    .timestamp_millis() as u64;
+                chrono::Utc::now().timestamp_millis() as u64;
+
+            let decimal_price =
+                Decimal::from_f64(price).unwrap_or_default();
 
             let sample = BtcSample {
                 timestamp_ms,
-                price: Decimal::from_f64(price)
-                    .unwrap_or_default(),
+                price: decimal_price,
             };
 
-            self.window
+            self.window.write().await.push(sample.clone());
+
+            self.window_state
                 .write()
                 .await
-                .push(sample.clone());
+                .ingest_btc(decimal_price, timestamp_ms);
 
-            self.snapshot.store(Arc::new(
-                BtcSnapshot {
-                    timestamp_ms,
-                    price: sample.price,
-                },
-            ));
+            self.snapshot.store(Arc::new(BtcSnapshot {
+                timestamp_ms,
+                price: decimal_price,
+            }));
         }
 
         warn!("btc stream disconnected");
@@ -151,10 +153,9 @@ impl BtcFeed {
         Ok(())
     }
 
-    pub async fn features(
-        &self,
-    ) -> BtcFeatures {
+    pub async fn features(&self) -> BtcFeatures {
         let window = self.window.read().await;
+        let ws = self.window_state.read().await;
 
         let latest = match window.latest() {
             Some(v) => v,
@@ -162,175 +163,136 @@ impl BtcFeed {
         };
 
         let current_price = latest.price;
+        let current_f = match current_price.to_f64() {
+            Some(v) => v,
+            None => return BtcFeatures::default(),
+        };
 
         let mut high = current_price;
         let mut low = current_price;
-
-        let mut sum = Decimal::ZERO;
-        let mut count = 0u64;
-
         let now_ms = latest.timestamp_ms;
 
-        let mut price_30s: Option<Decimal> = None;
-        let mut price_60s: Option<Decimal> = None;
-
-        let mut prices_30s = Vec::new();
-        let mut prices_60s = Vec::new();
+        let mut prices_30s: Vec<f64> = Vec::new();
+        let mut prices_60s: Vec<f64> = Vec::new();
+        let mut all_prices: Vec<f64> = Vec::new();
 
         for sample in window.iter() {
             if sample.price > high {
                 high = sample.price;
             }
-
             if sample.price < low {
                 low = sample.price;
             }
 
-            sum += sample.price;
-            count += 1;
+            let age_ms = now_ms.saturating_sub(sample.timestamp_ms);
+            let price_f = match sample.price.to_f64() {
+                Some(v) => v,
+                None => continue,
+            };
 
-            let age_ms =
-                now_ms.saturating_sub(
-                    sample.timestamp_ms,
-                );
+            all_prices.push(price_f);
 
             if age_ms <= 30_000 {
-                prices_30s.push(
-                    sample.price
-                        .to_f64()
-                        .unwrap_or(0.0),
-                );
-
-                price_30s = Some(sample.price);
+                prices_30s.push(price_f);
             }
-
             if age_ms <= 60_000 {
-                prices_60s.push(
-                    sample.price
-                        .to_f64()
-                        .unwrap_or(0.0),
-                );
-
-                price_60s = Some(sample.price);
+                prices_60s.push(price_f);
             }
         }
 
-        let current_f =
-            current_price.to_f64().unwrap_or(0.0);
+        let high_f = high.to_f64().unwrap_or(current_f);
+        let low_f = low.to_f64().unwrap_or(current_f);
+        let range_position = if high_f > low_f {
+            (current_f - low_f) / (high_f - low_f)
+        } else {
+            0.5
+        };
 
-        let momentum_30s =
-            price_30s
-                .and_then(|p| {
-                    let base = p.to_f64()?;
+        // Efficiency Ratio: |net displacement| / cumulative path length.
+        let net_displacement = ws.btc_distance_from_origin_pct.abs();
+        let efficiency_ratio = if ws.btc_path_length > 0.0 {
+            (net_displacement / ws.btc_path_length).min(1.0)
+        } else {
+            0.0
+        };
 
-                    if base.abs() < f64::EPSILON {
-                        Some(0.0)
-                    } else {
-                        Some(
-                            (current_f - base)
-                                / base,
-                        )
-                    }
-                })
-                .unwrap_or(0.0);
+        // Z-score of current price relative to the 5-minute rolling window.
+        let z_score = z_score_of(current_f, &all_prices);
 
-        let momentum_60s =
-            price_60s
-                .and_then(|p| {
-                    let base = p.to_f64()?;
+        // Momentum persistence: fraction of elapsed time on current side.
+        let momentum_persistence = if ws.btc_elapsed_seconds > 0.0 {
+            ws.btc_same_side_seconds / ws.btc_elapsed_seconds
+        } else {
+            0.5
+        };
 
-                    if base.abs() < f64::EPSILON {
-                        Some(0.0)
-                    } else {
-                        Some(
-                            (current_f - base)
-                                / base,
-                        )
-                    }
-                })
-                .unwrap_or(0.0);
-
-        fn volatility(
-            prices: &[f64],
-        ) -> f64 {
-            if prices.len() < 2 {
-                return 0.0;
-            }
-
-            let mean =
-                prices.iter().sum::<f64>()
-                    / prices.len() as f64;
-
-            let variance = prices
-                .iter()
-                .map(|v| {
-                    let d = *v - mean;
-                    d * d
-                })
-                .sum::<f64>()
-                / prices.len() as f64;
-
-            variance.sqrt() / mean.max(1.0)
-        }
-
-        let volatility_30s =
-            volatility(&prices_30s);
-
-        let volatility_60s =
-            volatility(&prices_60s);
-
-        let high_f =
-            high.to_f64().unwrap_or(0.0);
-
-        let low_f =
-            low.to_f64().unwrap_or(0.0);
-
-        let range_position =
-            if (high_f - low_f).abs()
-                < f64::EPSILON
-            {
-                0.5
-            } else {
-                ((current_f - low_f)
-                    / (high_f - low_f))
-                    .clamp(0.0, 1.0)
-            };
-
-        let distance_from_high_pct =
-            if high_f <= 0.0 {
-                0.0
-            } else {
-                (high_f - current_f)
-                    / high_f
-            };
-
-        let distance_from_low_pct =
-            if low_f <= 0.0 {
-                0.0
-            } else {
-                (current_f - low_f)
-                    / low_f
-            };
-
-        let vwap =
-            if count > 0 {
-                sum / Decimal::from(count)
-            } else {
-                Decimal::ZERO
-            };
+        // Average signed distance from origin over elapsed time.
+        let avg_distance_from_origin = if ws.btc_elapsed_seconds > 0.0 {
+            ws.btc_area / ws.btc_elapsed_seconds
+        } else {
+            0.0
+        };
 
         BtcFeatures {
             current_price,
+            origin_price: ws.btc_origin_price,
+            distance_from_origin_pct: ws.btc_distance_from_origin_pct,
+            efficiency_ratio,
+            volatility_30s: volatility(&prices_30s),
+            volatility_60s: volatility(&prices_60s),
+            z_score,
+            acceleration: ws.btc_acceleration,
+            momentum_persistence,
+            avg_distance_from_origin,
             high_5m: high,
             low_5m: low,
-            vwap_5m: vwap,
-            momentum_30s,
-            momentum_60s,
-            volatility_30s,
-            volatility_60s,
             range_position,
-            distance_from_high_pct,
-            distance_from_low_pct,
         }
     }
+}
+
+// ── Internal helpers ──────────────────────────────────────────────────────────
+
+/// Rolling coefficient of variation (std / mean) as a volatility proxy.
+fn volatility(prices: &[f64]) -> f64 {
+    if prices.len() < 2 {
+        return 0.0;
+    }
+
+    let mean = prices.iter().sum::<f64>() / prices.len() as f64;
+    let variance = prices
+        .iter()
+        .map(|v| {
+            let d = *v - mean;
+            d * d
+        })
+        .sum::<f64>()
+        / prices.len() as f64;
+
+    variance.sqrt() / mean.max(1.0)
+}
+
+/// Z-score of `value` relative to the distribution of `samples`.
+fn z_score_of(value: f64, samples: &[f64]) -> f64 {
+    if samples.len() < 2 {
+        return 0.0;
+    }
+
+    let n = samples.len() as f64;
+    let mean = samples.iter().sum::<f64>() / n;
+    let variance = samples
+        .iter()
+        .map(|v| {
+            let d = *v - mean;
+            d * d
+        })
+        .sum::<f64>()
+        / n;
+
+    let std = variance.sqrt();
+    if std < 1e-12 {
+        return 0.0;
+    }
+
+    (value - mean) / std
 }

@@ -1,8 +1,9 @@
+use serde::Serialize;
 use rust_decimal::Decimal;
 
 use crate::prediction::storage::Timestamped;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct BtcSample {
     pub timestamp_ms: u64,
     pub price: Decimal,
@@ -15,7 +16,7 @@ impl Timestamped for BtcSample {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct OrderbookSample {
     pub timestamp_ms: u64,
 
@@ -23,8 +24,6 @@ pub struct OrderbookSample {
 
     pub best_bid: Decimal,
     pub best_ask: Decimal,
-
-    pub last_trade_price: Decimal,
 
     pub bid_depth: Decimal,
     pub ask_depth: Decimal,

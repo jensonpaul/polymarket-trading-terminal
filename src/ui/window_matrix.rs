@@ -134,6 +134,55 @@ impl PolymarketDashboardApp {
                 }
 
                 // ----------------------------------------------------------------
+                // BTC metrics ticker
+                // ----------------------------------------------------------------
+                if let Some(pred) = self.prediction_state.signals.get(&window.timestamp_5m) {
+                    if let Some(btc) = pred.btc.as_ref() {
+                        if !btc.origin_price.is_zero() {
+                            let origin_f = btc.origin_price.to_string();
+                            let current_f = btc.current_price.to_string();
+                            let dist = btc.distance_from_origin_pct;
+                            let (arrow, dist_color) = if dist >= 0.0 {
+                                ("▲", Theme::BUY_GREEN)
+                            } else {
+                                ("▼", Theme::SELL_RED)
+                            };
+
+                            ui.add_space(6.0);
+                            panel_frame().show(ui, |ui| {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label(
+                                        egui::RichText::new("BTC")
+                                            .monospace()
+                                            .strong()
+                                            .color(Theme::TEXT_MUTED),
+                                    );
+                                    ui.separator();
+                                    ui.label(
+                                        egui::RichText::new(format!("origin {origin_f}"))
+                                            .monospace()
+                                            .color(Theme::TEXT_MUTED),
+                                    );
+                                    ui.separator();
+                                    ui.label(
+                                        egui::RichText::new(format!("now {current_f}"))
+                                            .monospace()
+                                            .color(Theme::TEXT_PRIMARY),
+                                    );
+                                    ui.separator();
+                                    ui.label(
+                                        egui::RichText::new(format!("{arrow} {:.4}%", dist * 100.0))
+                                            .monospace()
+                                            .strong()
+                                            .color(dist_color),
+                                    );
+                                });
+                            });
+                        }
+                    }
+                }
+
+                // ----------------------------------------------------------------
                 // Prediction information
                 // ----------------------------------------------------------------
                 if let Some(pred) =

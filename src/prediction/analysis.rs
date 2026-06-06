@@ -1,137 +1,154 @@
-use crate::prediction::{
-    PredictionContext,
-    PredictionSide,
-    DecayType,
-};
+use crate::prediction::{PredictionContext, PredictionSide};
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// BtcTrend — the complete picture of what BTC is doing right now.
+//
+// All dimensions are orthogonal; no thresholds or classifications are baked
+// in.  Consumers (strategies) interpret these values freely.
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 #[derive(Debug, Clone)]
-pub struct BtcBias {
+pub struct BtcTrend {
+    // ── 1. Direction ──────────────────────────────────────────────────────
+
+    /// Which way BTC is moving relative to its window origin.
     pub side: PredictionSide,
-    pub confidence: f64,
+
+    /// Signed `(current − origin) / origin`.  Magnitude indicates how far
+    /// BTC has moved; sign mirrors `side`.
+    pub distance_from_origin_pct: f64,
+
+    // ── 2. Trend quality (Efficiency Ratio) ───────────────────────────────
+
+    /// `|net_displacement| / path_length` in [0, 1].
+    ///
+    /// 1.0 → BTC moved in a straight line (clean, trustworthy trend).
+    /// 0.0 → all noise, no net progress (choppy, unreliable).
+    pub efficiency_ratio: f64,
+
+    // ── 3. Volatility / Z-score ───────────────────────────────────────────
+
+    /// Rolling coefficient-of-variation over the last 30 s.
+    /// Absolute noise level on a short horizon.
+    pub volatility_30s: f64,
+
+    /// Same over the last 60 s.  Higher than `volatility_30s` after a
+    /// recent calm; lower after a recent spike.
+    pub volatility_60s: f64,
+
+    /// How extreme the current price is within its own 5-minute distribution.
+    /// Self-normalising.  Large positive → BTC unusually high right now.
+    pub z_score: f64,
+
+    // ── 4. Acceleration ───────────────────────────────────────────────────
+
+    /// `current_tick_return − prev_tick_return` — second derivative of price.
+    ///
+    /// Positive + up-trend  → momentum is building.
+    /// Negative + up-trend  → momentum is fading or reversing.
+    pub acceleration: f64,
+
+    // ── 5. Momentum persistence ───────────────────────────────────────────
+
+    /// Fraction of elapsed window time BTC has spent on the same side as its
+    /// current direction from origin.
+    ///
+    /// 1.0 → completely consistent trend since origin lock.
+    /// 0.5 → equally split; no persistence.
+    /// < 0.5 → mean-reverting character.
+    pub momentum_persistence: f64,
+
+    /// `Σ(distance_pct * dt) / elapsed_seconds` — the time-averaged signed
+    /// distance from origin.  Captures both duration and magnitude of the
+    /// trend in a single number.
+    pub avg_distance_from_origin: f64,
+
+    // ── Range context ─────────────────────────────────────────────────────
+
+    /// Where BTC sits within its 5-minute high/low band.
+    /// 0.0 = at the 5m low, 1.0 = at the 5m high.
+    pub range_position: f64,
 }
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// TokenTrend — symmetric summary for one Polymarket token side.
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 #[derive(Debug, Clone)]
-pub struct HypeAnalysis {
-    pub hyped_side: PredictionSide,
-    pub trending_side: PredictionSide,
+pub struct TokenTrend {
+    /// Signed distance from the token's first trade price this window.
+    pub distance_from_origin_pct: f64,
 
-    pub confidence: f64,
+    /// Time-weighted AUC — the token's time-averaged signed drift.
+    pub avg_distance_from_origin: f64,
 
-    pub btc_alignment: f64,
-
-    pub decay_type: DecayType,
-
-    pub hype_score: f64,
+    /// Orderbook imbalance: positive → buy pressure; negative → sell pressure.
+    pub imbalance: f64,
 }
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// MarketAnalyzer
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 pub struct MarketAnalyzer;
 
 impl MarketAnalyzer {
-    pub fn btc_bias(ctx: &PredictionContext) -> BtcBias {
+    /// Compute the [`BtcTrend`] from the current context.
+    ///
+    /// Returns `None` if the BTC origin has not yet been locked
+    /// (i.e., the 3-second warm-up has not completed).
+    pub fn btc_trend(ctx: &PredictionContext) -> Option<BtcTrend> {
         let btc = &ctx.btc;
 
-        let mut up_score = 0.0;
-        let mut down_score = 0.0;
-
-        if btc.range_position <= 0.15 {
-            up_score += 40.0;
+        if btc.origin_price.is_zero() {
+            return None;
         }
 
-        if btc.range_position >= 0.85 {
-            down_score += 40.0;
-        }
-
-        if btc.momentum_30s > 0.0 {
-            up_score += btc.momentum_30s.abs() * 1000.0;
+        let side = if btc.distance_from_origin_pct >= 0.0 {
+            PredictionSide::Up
         } else {
-            down_score += btc.momentum_30s.abs() * 1000.0;
-        }
-
-        if btc.momentum_60s > 0.0 {
-            up_score += btc.momentum_60s.abs() * 1000.0;
-        } else {
-            down_score += btc.momentum_60s.abs() * 1000.0;
-        }
-
-        if up_score >= down_score {
-            BtcBias {
-                side: PredictionSide::Up,
-                confidence: (up_score - down_score).clamp(0.0, 100.0),
-            }
-        } else {
-            BtcBias {
-                side: PredictionSide::Down,
-                confidence: (down_score - up_score).clamp(0.0, 100.0),
-            }
-        }
-    }
-
-    pub fn hype_analysis(ctx: &PredictionContext) -> Option<HypeAnalysis> {
-        let btc_bias = Self::btc_bias(ctx);
-
-        let up_strength = Self::token_strength(
-            ctx.polymarket.up.velocity,
-            ctx.polymarket.up.acceleration,
-            ctx.polymarket.up.imbalance,
-        );
-
-        let down_strength = Self::token_strength(
-            ctx.polymarket.down.velocity,
-            ctx.polymarket.down.acceleration,
-            ctx.polymarket.down.imbalance,
-        );
-
-        let (hyped_side, trending_side, token_delta) = if up_strength > down_strength {
-            (
-                PredictionSide::Up,
-                PredictionSide::Down,
-                up_strength - down_strength,
-            )
-        } else {
-            (
-                PredictionSide::Down,
-                PredictionSide::Up,
-                down_strength - up_strength,
-            )
+            PredictionSide::Down
         };
 
-        let btc_alignment = match (btc_bias.side, hyped_side) {
-            (PredictionSide::Up, PredictionSide::Up) => 1.0,
-            (PredictionSide::Down, PredictionSide::Down) => 1.0,
-            _ => -1.0,
-        };
-
-        let decay_rate = match hyped_side {
-            PredictionSide::Up => ctx.polymarket.down.decay_rate,
-            PredictionSide::Down => ctx.polymarket.up.decay_rate,
-        };
-
-        let decay_type = if decay_rate <= -0.30 {
-            DecayType::Sudden
-        } else if decay_rate <= -0.10 {
-            DecayType::Gradual
-        } else {
-            DecayType::Flat
-        };
-
-        Some(HypeAnalysis {
-            hyped_side,
-            trending_side,
-            confidence: token_delta.clamp(0.0, 100.0),
-            btc_alignment,
-            decay_type,
-            hype_score: token_delta,
+        Some(BtcTrend {
+            side,
+            distance_from_origin_pct: btc.distance_from_origin_pct,
+            efficiency_ratio: btc.efficiency_ratio,
+            volatility_30s: btc.volatility_30s,
+            volatility_60s: btc.volatility_60s,
+            z_score: btc.z_score,
+            acceleration: btc.acceleration,
+            momentum_persistence: btc.momentum_persistence,
+            avg_distance_from_origin: btc.avg_distance_from_origin,
+            range_position: btc.range_position,
         })
     }
 
-    #[inline]
-    fn token_strength(
-        velocity: f64,
-        acceleration: f64,
-        imbalance: f64,
-    ) -> f64 {
-        velocity.abs() * 100.0
-            + acceleration.abs() * 100.0
-            + imbalance.abs() * 25.0
+    /// Summarise one Polymarket token side relative to its window origin.
+    pub fn token_trend(
+        ctx: &PredictionContext,
+        side: PredictionSide,
+        elapsed_seconds: f64,
+    ) -> Option<TokenTrend> {
+        let token = match side {
+            PredictionSide::Up => &ctx.polymarket.up,
+            PredictionSide::Down => &ctx.polymarket.down,
+        };
+
+        if token.origin_price.is_zero() {
+            return None;
+        }
+
+        let avg_distance = if elapsed_seconds > 0.0 {
+            token.area_under_curve / elapsed_seconds
+        } else {
+            0.0
+        };
+
+        Some(TokenTrend {
+            distance_from_origin_pct: token.distance_from_origin_pct,
+            avg_distance_from_origin: avg_distance,
+            imbalance: token.imbalance,
+        })
     }
 }
