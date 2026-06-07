@@ -1191,7 +1191,7 @@ pub async fn get_or_fetch_token_ids(
 }
 
 #[instrument(skip(client))]
-async fn get_or_fetch_market(client: &GammaClient, slug: &str) -> anyhow::Result<Market> {
+pub async fn get_or_fetch_market(client: &GammaClient, slug: &str) -> anyhow::Result<Market> {
     {
         let cache = MARKET_CACHE.lock().unwrap();
         if let Some(m) = cache.get(slug) {

@@ -2,6 +2,9 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use std::sync::Mutex;
+use std::collections::HashMap;
+
 use arc_swap::ArcSwap;
 use polymarket_client_sdk_v2::{
     gamma::Client as GammaClient,
@@ -10,9 +13,11 @@ use polymarket_client_sdk_v2::{
 use tokio::sync::RwLock;
 use tracing::{error, info};
 
+use polymarket_client_sdk_v2::gamma::types::response::Market;
+
 use crate::{
     prediction::{
-        btc_feed::{BtcFeed, BtcSnapshot},
+        btc_feed::{BtcFeed, BtcSnapshot, MarketCache},
         polymarket_feed::{MarketAssets, PolymarketFeed},
         PolymarketFeatures,
         PredictionContext,
@@ -21,7 +26,7 @@ use crate::{
         WindowState,
     },
     state::{slug_for_ts, stamp_5m},
-    worker::get_or_fetch_token_ids,
+    worker::{get_or_fetch_token_ids, get_or_fetch_market},
 };
 
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
@@ -96,6 +101,18 @@ impl PredictionService {
                     .await;
 
                 let slug = slug_for_ts(window_ts);
+
+                match get_or_fetch_market(&gamma, &slug).await {
+                    Ok(market) => {
+                        if let Ok(mut cache) = self.btc_feed.market_cache.lock() {
+                            cache.insert(slug.clone(), market.clone());
+                        }
+                    }
+
+                    Err(e) => {
+                        tracing::warn!("market cache failed!");
+                    }
+                }
 
                 match get_or_fetch_token_ids(&gamma, &slug).await {
                     Ok(token_ids) if token_ids.len() >= 2 => {

@@ -147,27 +147,28 @@ impl PolymarketDashboardApp {
                             } else {
                                 ("▼", Theme::SELL_RED)
                             };
+                            let distance_from_origin = (btc.current_price - btc.origin_price).abs();
 
                             ui.add_space(6.0);
                             panel_frame().show(ui, |ui| {
                                 ui.horizontal_wrapped(|ui| {
                                     ui.label(
-                                        egui::RichText::new("BTC")
-                                            .monospace()
-                                            .strong()
-                                            .color(Theme::TEXT_MUTED),
-                                    );
-                                    ui.separator();
-                                    ui.label(
-                                        egui::RichText::new(format!("origin {origin_f}"))
-                                            .monospace()
-                                            .color(Theme::TEXT_MUTED),
-                                    );
-                                    ui.separator();
-                                    ui.label(
-                                        egui::RichText::new(format!("now {current_f}"))
+                                        egui::RichText::new(format!("${:.2}", btc.origin_price))
                                             .monospace()
                                             .color(Theme::TEXT_PRIMARY),
+                                    );
+                                    ui.separator();
+                                    ui.label(
+                                        egui::RichText::new(format!("${:.2}", btc.current_price))
+                                            .monospace()
+                                            .color(Theme::WARNING),
+                                    );
+                                    ui.separator();
+                                    ui.label(
+                                        egui::RichText::new(format!("${:.2}", distance_from_origin))
+                                            .monospace()
+                                            .strong()
+                                            .color(dist_color),
                                     );
                                     ui.separator();
                                     ui.label(
