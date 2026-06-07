@@ -26,6 +26,12 @@ pub struct BtcTrend {
     /// 0.0 → all noise, no net progress (choppy, unreliable).
     pub efficiency_ratio: f64,
 
+    pub er_1s:   f64,
+    pub er_5s:   f64,
+    pub er_10s:  f64,
+    pub er_30s:  f64,
+    pub er_full: f64,
+
     // ── 3. Volatility / Z-score ───────────────────────────────────────────
 
     /// Rolling coefficient-of-variation over the last 30 s.
@@ -38,7 +44,9 @@ pub struct BtcTrend {
 
     /// How extreme the current price is within its own 5-minute distribution.
     /// Self-normalising.  Large positive → BTC unusually high right now.
-    pub z_score: f64,
+    pub z_score_30: f64,
+    pub z_score_60: f64,
+    pub z_score_5m: f64,
 
     // ── 4. Acceleration ───────────────────────────────────────────────────
 
@@ -114,9 +122,16 @@ impl MarketAnalyzer {
             side,
             distance_from_origin_pct: btc.distance_from_origin_pct,
             efficiency_ratio: btc.efficiency_ratio,
+            er_1s:   btc.er_1s,
+            er_5s:   btc.er_5s,
+            er_10s:  btc.er_10s,
+            er_30s:  btc.er_30s,
+            er_full: btc.er_full,
             volatility_30s: btc.volatility_30s,
             volatility_60s: btc.volatility_60s,
-            z_score: btc.z_score,
+            z_score_30: btc.z_score_30,
+            z_score_60: btc.z_score_60,
+            z_score_5m: btc.z_score_5m,
             acceleration: btc.acceleration,
             momentum_persistence: btc.momentum_persistence,
             avg_distance_from_origin: btc.avg_distance_from_origin,

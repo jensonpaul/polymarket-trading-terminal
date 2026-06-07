@@ -29,6 +29,23 @@ pub struct BtcFeatures {
     /// Computed as `|distance_from_origin_pct| / btc_path_length`.
     pub efficiency_ratio: f64,
 
+    // ── Efficiency Ratio by interval ─────────────────────────────────────────
+
+    /// ER over the last ~1 s of ticks.  Captures the very latest micro-structure.
+    pub er_1s: f64,
+
+    /// ER over the last ~5 s.
+    pub er_5s: f64,
+
+    /// ER over the last ~10 s.
+    pub er_10s: f64,
+
+    /// ER over the last ~30 s.
+    pub er_30s: f64,
+
+    /// ER over the full 5-minute rolling window.
+    pub er_full: f64,
+
     // ── Volatility ────────────────────────────────────────────────────────
 
     /// Rolling std dev of log-returns over the last 30 s, normalised by mean
@@ -42,7 +59,15 @@ pub struct BtcFeatures {
     /// window.  Self-normalising: tells you how extreme the current price is
     /// relative to its own distribution this window.
     /// A large positive z-score means BTC is unusually high right now.
-    pub z_score: f64,
+
+    /// Z-score of current price against the last 30 s distribution.
+    pub z_score_30: f64,
+
+    /// Z-score of current price against the last 60 s distribution.
+    pub z_score_60: f64,
+
+    /// Z-score of current price against the full 5-minute window distribution.
+    pub z_score_5m: f64,
 
     // ── Acceleration ──────────────────────────────────────────────────────
 

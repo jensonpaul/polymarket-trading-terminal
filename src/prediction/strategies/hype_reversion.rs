@@ -78,21 +78,39 @@ impl PredictionStrategy for HypeReversionStrategy {
         }
 
         let reason = format!(
+            /*
             "hype_reversion \
              btcSide={:?} dist={:.4} er={:.3} \
-             persist={:.2} z={:.2} accel={:.5} \
+             persist={:.2} z30={:.2} z60={:.2} z5m={:.2} accel={:.5} \
              vol30={:.4} rangePos={:.2} \
              suppressed={:?} entry={:.4}",
             trend.side,
             trend.distance_from_origin_pct,
             trend.efficiency_ratio,
             trend.momentum_persistence,
-            trend.z_score,
+            trend.z_score_30,
+            trend.z_score_60,
+            trend.z_score_5m,
             trend.acceleration,
             trend.volatility_30s,
             trend.range_position,
             target_side,
             entry.to_f64().unwrap_or(0.0),
+            */
+            "er={:.3} \
+             er1s={:.3} er5s={:.3} er10s={:.3} er30s={:.3} erFull={:.3} \
+             z30={:.2} z60={:.2} z5m={:.2} \
+             rangePos={:.2}",
+            trend.efficiency_ratio,
+            trend.er_1s,
+            trend.er_5s,
+            trend.er_10s,
+            trend.er_30s,
+            trend.er_full,
+            trend.z_score_30,
+            trend.z_score_60,
+            trend.z_score_5m,
+            trend.range_position,
         );
 
         Some(PredictionSignal {

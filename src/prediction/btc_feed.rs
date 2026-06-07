@@ -183,6 +183,7 @@ impl BtcFeed {
         let mut low = current_price;
         let now_ms = latest.timestamp_ms;
 
+        /*
         let mut prices_30s: Vec<f64> = Vec::new();
         let mut prices_60s: Vec<f64> = Vec::new();
         let mut all_prices: Vec<f64> = Vec::new();
@@ -210,6 +211,33 @@ impl BtcFeed {
                 prices_60s.push(price_f);
             }
         }
+        */
+
+        let mut prices_1s:  Vec<f64> = Vec::new();
+        let mut prices_5s:  Vec<f64> = Vec::new();
+        let mut prices_10s: Vec<f64> = Vec::new();
+        let mut prices_30s: Vec<f64> = Vec::new();
+        let mut prices_60s: Vec<f64> = Vec::new();
+        let mut all_prices: Vec<f64> = Vec::new();
+
+        for sample in window.iter() {
+            if sample.price > high { high = sample.price; }
+            if sample.price < low  { low  = sample.price; }
+
+            let age_ms = now_ms.saturating_sub(sample.timestamp_ms);
+            let price_f = match sample.price.to_f64() {
+                Some(v) => v,
+                None => continue,
+            };
+
+            all_prices.push(price_f);
+
+            if age_ms <=  1_000 { prices_1s.push(price_f); }
+            if age_ms <=  5_000 { prices_5s.push(price_f); }
+            if age_ms <= 10_000 { prices_10s.push(price_f); }
+            if age_ms <= 30_000 { prices_30s.push(price_f); }
+            if age_ms <= 60_000 { prices_60s.push(price_f); }
+        }
 
         let high_f = high.to_f64().unwrap_or(current_f);
         let low_f = low.to_f64().unwrap_or(current_f);
@@ -227,8 +255,16 @@ impl BtcFeed {
             0.0
         };
 
+        let er_1s   = efficiency_ratio_over(&prices_1s);
+        let er_5s   = efficiency_ratio_over(&prices_5s);
+        let er_10s  = efficiency_ratio_over(&prices_10s);
+        let er_30s  = efficiency_ratio_over(&prices_30s);
+        let er_full = efficiency_ratio_over(&all_prices);
+
         // Z-score of current price relative to the 5-minute rolling window.
-        let z_score = z_score_of(current_f, &all_prices);
+        let z_score_30 = z_score_of(current_f, &prices_30s);
+        let z_score_60 = z_score_of(current_f, &prices_60s);
+        let z_score_5m = z_score_of(current_f, &all_prices);
 
         // Momentum persistence: fraction of elapsed time on current side.
         let momentum_persistence = if ws.btc_elapsed_seconds > 0.0 {
@@ -249,9 +285,16 @@ impl BtcFeed {
             origin_price: ws.btc_origin_price,
             distance_from_origin_pct: ws.btc_distance_from_origin_pct,
             efficiency_ratio,
+            er_1s,
+            er_5s,
+            er_10s,
+            er_30s,
+            er_full,
             volatility_30s: volatility(&prices_30s),
             volatility_60s: volatility(&prices_60s),
-            z_score,
+            z_score_30,
+            z_score_60,
+            z_score_5m,
             acceleration: ws.btc_acceleration,
             momentum_persistence,
             avg_distance_from_origin,
@@ -306,4 +349,28 @@ fn z_score_of(value: f64, samples: &[f64]) -> f64 {
     }
 
     (value - mean) / std
+}
+
+/// Efficiency Ratio over a price slice.
+///
+/// `|last − first| / Σ|price_n − price_{n-1}|`
+///
+/// Returns `0.0` if the slice has fewer than 2 samples or the path length
+/// is zero (flat price).
+fn efficiency_ratio_over(prices: &[f64]) -> f64 {
+    if prices.len() < 2 {
+        return 0.0;
+    }
+
+    let net = (prices.last().unwrap() - prices.first().unwrap()).abs();
+    let path: f64 = prices
+        .windows(2)
+        .map(|w| (w[1] - w[0]).abs())
+        .sum();
+
+    if path > 0.0 {
+        (net / path).min(1.0)
+    } else {
+        0.0
+    }
 }
