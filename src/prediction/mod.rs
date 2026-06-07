@@ -14,6 +14,7 @@ pub mod strategy;
 pub mod window_state;
 
 pub mod strategies;
+pub mod btc_aggregator;
 
 pub use analysis::*;
 pub use context::*;
