@@ -13,7 +13,7 @@ impl PolymarketDashboardApp {
         queue: Queue,
     ) {
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new(label).color(Theme::TEXT_MUTED));
+            ui.label(egui::RichText::new(label).monospace().color(Theme::TEXT_MUTED));
             ui.add_space(6.0);
 
             let response = ui.add(
@@ -21,7 +21,7 @@ impl PolymarketDashboardApp {
                     .desired_width(70.0),
             );
 
-            ui.label(egui::RichText::new("ms").color(Theme::TEXT_MUTED));
+            ui.label(egui::RichText::new("ms").monospace().color(Theme::TEXT_MUTED));
 
             if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 let value = self.interval_inputs.get(queue).to_owned();

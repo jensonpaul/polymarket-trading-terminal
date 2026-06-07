@@ -65,14 +65,6 @@ impl PredictionStrategy for HypeReversionStrategy {
         // BTC origin must be locked.
         let trend = MarketAnalyzer::btc_trend(ctx)?;
 
-        // Late-window: settlement risk outweighs reversion upside.
-        if ctx.seconds_remaining <= 30 {
-            return Some(PredictionSignal::no_trade(
-                "settlement window",
-                ctx.timestamp_ms,
-            ));
-        }
-
         let target_side = Self::suppressed_side(trend.side);
 
         let target_token = match target_side {

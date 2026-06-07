@@ -19,7 +19,7 @@ impl PolymarketDashboardApp {
     pub fn render_lifecycle_matrix(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.heading(
-                egui::RichText::new("📊 WINDOW LIFECYCLE MATRIX").color(Theme::TEXT_PRIMARY),
+                egui::RichText::new("📊 WINDOW LIFECYCLE MATRIX").monospace().color(Theme::TEXT_PRIMARY),
             );
             ui.separator();
             ui.checkbox(&mut self.auto_refresh_active, "LIVE");
@@ -272,7 +272,8 @@ impl PolymarketDashboardApp {
                     ui.columns(3, |cols| {
                         Self::render_order_column(
                             &mut cols[0],
-                            "🟢 BOUGHT",
+                            //"🟢 BOUGHT",
+                            "BOUGHT",
                             &bought,
                             window_ts,
                             &state,
@@ -280,7 +281,8 @@ impl PolymarketDashboardApp {
                         );
                         Self::render_order_column(
                             &mut cols[1],
-                            "🔵 SOLD",
+                            //"🔵 SOLD",
+                            "SOLD",
                             &sold,
                             window_ts,
                             &state,
@@ -288,7 +290,8 @@ impl PolymarketDashboardApp {
                         );
                         Self::render_order_column(
                             &mut cols[2],
-                            "⚫ OTHERS",
+                            //"⚫ OTHERS",
+                            "OTHERS",
                             &others,
                             window_ts,
                             &state,
@@ -337,9 +340,9 @@ impl PolymarketDashboardApp {
     ) {
         panel_frame().show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.heading(egui::RichText::new(title).color(Theme::TEXT_PRIMARY));
+                ui.heading(egui::RichText::new(title).monospace().color(Theme::TEXT_PRIMARY));
                 ui.separator();
-                ui.label(egui::RichText::new(ids.len().to_string()).color(Theme::TEXT_MUTED));
+                ui.label(egui::RichText::new(ids.len().to_string()).monospace().color(Theme::TEXT_MUTED));
             });
 
             ui.add_space(8.0);

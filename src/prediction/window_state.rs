@@ -122,7 +122,6 @@ impl WindowState {
     /// Once the VWAP is frozen all trend metrics update each tick.
     pub fn ingest_btc(&mut self, price: Decimal, timestamp_ms: u64) {
         // ── Lock-in phase: first tick ────────────────────────────────────────
-        /*
         if !self.btc_origin_locked {
             // Use the very first tick as the origin price
             self.btc_origin_price = price;
@@ -134,7 +133,6 @@ impl WindowState {
             // No need to accumulate anything
             return;
         }
-        */
 
         // ── Lock-in phase (0 – 3 s) ───────────────────────────────────────
         if !self.btc_origin_locked {

@@ -296,28 +296,140 @@ impl eframe::App for PolymarketDashboardApp {
         // Top bar
         // ------------------------------------------------------------------
         egui::TopBottomPanel::top("top_bar")
-            .exact_height(42.0)
+            .exact_height(48.0)
+            .frame(
+                egui::Frame::none()
+                    .fill(Theme::BG_ELEVATED)
+                    .stroke(egui::Stroke::new(1.0, Theme::BORDER))
+                    .inner_margin(egui::Margin::symmetric(16, 0)),
+            )
             .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.heading(
-                        egui::RichText::new("Polymarket Trading Terminal")
+                // Vertically centre everything in the 48px bar.
+                ui.vertical_centered_justified(|ui| {
+                    ui.set_height(48.0);
+                });
+
+                let bar_rect = ui.max_rect();
+                ui.allocate_ui_at_rect(bar_rect, |ui| {
+                    ui.horizontal(|ui| {
+                        // ── force vertical centering ──────────────────────
+                        ui.add_space(0.0);
+                        let v_pad = (bar_rect.height() - 22.0) / 2.0;
+                        ui.add_space(v_pad); // won't work in horizontal — use the painter trick below
+                    });
+                });
+
+                // egui horizontal panels don't support vertical centering via
+                // add_space, so we paint directly.
+                let painter = ui.painter();
+                let _ = painter; // used below via ui.with_layout
+
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    // ── Branding ─────────────────────────────────────────────
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new("◈")
+                            .size(18.0)
+                            .monospace()
+                            .color(Theme::BLUE),
+                    );
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new("POLYMARKET")
+                            .strong()
+                            .monospace()
+                            .size(15.0)
                             .color(Theme::TEXT_PRIMARY),
                     );
+                    ui.label(
+                        egui::RichText::new("TERMINAL")
+                            .monospace()
+                            .size(15.0)
+                            .color(Theme::TEXT_MUTED),
+                    );
 
-                    ui.with_layout(
-                        egui::Layout::right_to_left(egui::Align::Center),
-                        |ui| {
+                    ui.add_space(12.0);
+                    ui.separator();
+                    ui.add_space(12.0);
+
+                    // ── Live indicator ────────────────────────────────────────
+                    let live_color = if self.auto_refresh_active {
+                        Theme::BUY_GREEN
+                    } else {
+                        Theme::TEXT_MUTED
+                    };
+                    ui.label(
+                        egui::RichText::new("●")
+                            .monospace()
+                            .size(10.0)
+                            .color(live_color),
+                    );
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new(if self.auto_refresh_active { "LIVE" } else { "PAUSED" })
+                            .monospace()
+                            .size(11.0)
+                            .color(live_color),
+                    );
+
+                    // ── Right-aligned controls ────────────────────────────────
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.add_space(4.0);
+
+                        // Countdown pill
+                        let urgency_color = if time_remaining <= 30 {
+                            Theme::SELL_RED
+                        } else if time_remaining <= 60 {
+                            Theme::WARNING
+                        } else {
+                            Theme::TEXT_MUTED
+                        };
+
+                        let pill_frame = egui::Frame::none()
+                            .fill(Theme::BG_PANEL)
+                            .stroke(egui::Stroke::new(1.0, urgency_color))
+                            .corner_radius(6.0)
+                            .inner_margin(egui::Margin::symmetric(10, 4));
+
+                        pill_frame.show(ui, |ui| {
                             ui.label(
                                 egui::RichText::new(format!(
-                                    "RESET {:02}:{:02}",
+                                    "⟳  {:02}:{:02}",
                                     time_remaining / 60,
                                     time_remaining % 60
                                 ))
                                 .monospace()
-                                .color(Theme::WARNING),
+                                .size(13.0)
+                                .color(urgency_color),
                             );
-                        },
-                    );
+                        });
+
+                        ui.add_space(12.0);
+                        ui.separator();
+                        ui.add_space(12.0);
+
+                        // Window count badge
+                        let win_count = self.windows.len();
+                        ui.label(
+                            egui::RichText::new(format!("{win_count} WINDOWS"))
+                                .monospace()
+                                .size(11.0)
+                                .color(Theme::TEXT_MUTED),
+                        );
+
+                        ui.add_space(8.0);
+                        ui.separator();
+                        ui.add_space(8.0);
+
+                        // Active orders count
+                        let open_orders = self.state.orders.len();
+                        ui.label(
+                            egui::RichText::new(format!("{open_orders} ORDERS"))
+                                .monospace()
+                                .size(11.0)
+                                .color(Theme::TEXT_MUTED),
+                        );
+                    });
                 });
             });
 
@@ -325,10 +437,18 @@ impl eframe::App for PolymarketDashboardApp {
         // Toast notifications overlay
         // ------------------------------------------------------------------
         if !self.notifications.is_empty() {
-            egui::Window::new("Notifications")
-                .anchor(egui::Align2::RIGHT_TOP, [-12.0, 50.0])
+            egui::Window::new("##notifications")
+                .anchor(egui::Align2::RIGHT_TOP, [-12.0, 56.0])
                 .resizable(false)
                 .collapsible(false)
+                .title_bar(false)
+                .frame(
+                    egui::Frame::none()
+                        .fill(Theme::BG_ELEVATED)
+                        .stroke(egui::Stroke::new(1.0, Theme::BORDER))
+                        .corner_radius(8.0)
+                        .inner_margin(12.0),
+                )
                 .show(ctx, |ui| {
                     for toast in &self.notifications {
                         let color = match toast.kind {

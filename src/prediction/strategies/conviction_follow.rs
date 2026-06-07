@@ -53,14 +53,6 @@ impl PredictionStrategy for ConvictionFollowStrategy {
         // BTC origin must be locked.
         let trend = MarketAnalyzer::btc_trend(ctx)?;
 
-        // Late-window: settlement risk outweighs trend-follow upside.
-        if ctx.seconds_remaining <= 30 {
-            return Some(PredictionSignal::no_trade(
-                "settlement window",
-                ctx.timestamp_ms,
-            ));
-        }
-
         let elapsed =
             300u64.saturating_sub(ctx.seconds_remaining) as f64;
 
