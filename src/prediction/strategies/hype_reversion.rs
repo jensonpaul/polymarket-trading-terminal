@@ -97,16 +97,21 @@ impl PredictionStrategy for HypeReversionStrategy {
             target_side,
             entry.to_f64().unwrap_or(0.0),
             */
-            "er={:.3} \
+            "dist={:.4} er={:.3} \
              er1s={:.3} er5s={:.3} er10s={:.3} er30s={:.3} erFull={:.3} \
+             persist={:.2} accel={:.5} vol30={:.4} \
              z30={:.2} z60={:.2} z5m={:.2} \
              rangePos={:.2}",
+            trend.distance_from_origin_pct,
             trend.efficiency_ratio,
             trend.er_1s,
             trend.er_5s,
             trend.er_10s,
             trend.er_30s,
             trend.er_full,
+            trend.momentum_persistence,
+            trend.acceleration,
+            trend.volatility_30s,
             trend.z_score_30,
             trend.z_score_60,
             trend.z_score_5m,

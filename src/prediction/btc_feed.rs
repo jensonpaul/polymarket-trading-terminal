@@ -196,6 +196,7 @@ impl BtcFeed {
         let mut low  = current_price;
         let now_ms   = latest.timestamp_ms;
 
+        // ── Dense bins (for volatility, z-score, high/low) ────────────────
         let mut prices_1s:  Vec<f64> = Vec::new();
         let mut prices_5s:  Vec<f64> = Vec::new();
         let mut prices_10s: Vec<f64> = Vec::new();
@@ -236,11 +237,28 @@ impl BtcFeed {
             0.0
         };
 
-        let er_1s   = efficiency_ratio_over(&prices_1s);
-        let er_5s   = efficiency_ratio_over(&prices_5s);
-        let er_10s  = efficiency_ratio_over(&prices_10s);
-        let er_30s  = efficiency_ratio_over(&prices_30s);
-        let er_full = efficiency_ratio_over(&all_prices);
+        // ── Strided ER: one sample per stride_ms, newest-first ────────────
+        //
+        // For each ER variant we walk the rolling window (oldest → newest)
+        // and snap one price per stride bucket.  This means:
+        //   er_1s  → samples every  1 000 ms  → up to  5 points over  5 min
+        //   er_5s  → samples every  5 000 ms  → up to  5 points over  5 min  (wait — see below)
+        //
+        // We look back a fixed horizon equal to stride_ms * max_points so
+        // that each variant uses the same number of strides regardless of
+        // how far back data goes.
+        //
+        // Sampling logic (newest-first bucketing):
+        //   bucket_index = (now_ms - sample.timestamp_ms) / stride_ms
+        //   Keep the first (= newest) sample that falls in each bucket.
+        //
+        // The result is then reversed so prices run oldest → newest before
+        // being handed to efficiency_ratio_over (net = last − first).
+        let er_1s   = strided_er(window.iter(), now_ms,  1_000,  60);
+        let er_5s   = strided_er(window.iter(), now_ms,  5_000,  60);
+        let er_10s  = strided_er(window.iter(), now_ms, 10_000,  30);
+        let er_30s  = strided_er(window.iter(), now_ms, 30_000,  10);
+        let er_full = strided_er(window.iter(), now_ms, 60_000,   5);
 
         let z_score_30 = z_score_of(current_f, &prices_30s);
         let z_score_60 = z_score_of(current_f, &prices_60s);
@@ -374,6 +392,68 @@ fn z_score_of(value: f64, samples: &[f64]) -> f64 {
     let std  = var.sqrt();
     if std < 1e-12 { return 0.0; }
     (value - mean) / std
+}
+
+/// Compute the Efficiency Ratio using **strided** price sampling.
+///
+/// Instead of taking every available 250 ms candle (which inflates path
+/// length with micro-noise), we snap **one price per `stride_ms` bucket**
+/// and feed only those sparse samples into the ER formula.
+///
+/// # Parameters
+/// - `iter`      – the rolling window iterator (oldest → newest `BtcSample`s)
+/// - `now_ms`    – timestamp of the most recent sample
+/// - `stride_ms` – bucket width in milliseconds (e.g. 1 000 for er_1s)
+/// - `max_buckets` – how many buckets to look back; total look-back =
+///                  `stride_ms * max_buckets`
+///
+/// # Bucket assignment (newest-first)
+/// For each sample we compute:
+/// ```text
+/// bucket = (now_ms - sample.timestamp_ms) / stride_ms
+/// ```
+/// We keep the **newest** sample per bucket (i.e. the one with the
+/// smallest `age_ms` within that bucket).  Because `iter` goes oldest →
+/// newest, we just overwrite on each visit — the last write per bucket is
+/// the newest sample in it.
+///
+/// After collecting, the bucket map is sorted by bucket index (ascending =
+/// oldest first) and handed to `efficiency_ratio_over`.
+fn strided_er<'a>(
+    iter:        impl Iterator<Item = &'a BtcSample>,
+    now_ms:      u64,
+    stride_ms:   u64,
+    max_buckets: u64,
+) -> f64 {
+    let horizon_ms = stride_ms * max_buckets;
+ 
+    // bucket_index → price (newest sample in that bucket wins)
+    let mut buckets: std::collections::BTreeMap<u64, f64> = std::collections::BTreeMap::new();
+ 
+    for sample in iter {
+        let age_ms = now_ms.saturating_sub(sample.timestamp_ms);
+        if age_ms > horizon_ms {
+            continue;
+        }
+        let bucket = age_ms / stride_ms;
+        let price_f = match sample.price.to_f64() {
+            Some(v) => v,
+            None => continue,
+        };
+        // Overwrite: since iter goes oldest → newest the last write is the
+        // newest sample in each bucket, which is what we want.
+        buckets.insert(bucket, price_f);
+    }
+ 
+    if buckets.len() < 2 {
+        return 0.0;
+    }
+ 
+    // BTreeMap is sorted ascending by key (= ascending age = oldest first
+    // when we reverse).  We want prices in chronological order (oldest →
+    // newest), which is descending bucket index.
+    let prices: Vec<f64> = buckets.into_values().rev().collect();
+    efficiency_ratio_over(&prices)
 }
 
 fn efficiency_ratio_over(prices: &[f64]) -> f64 {
