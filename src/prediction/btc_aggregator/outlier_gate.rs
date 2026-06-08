@@ -111,6 +111,7 @@ impl OutlierGate {
         let z = 0.6745 * (price - med).abs() / (mad + f64::EPSILON);
 
         if z > self.cfg.z_threshold {
+            /*
             warn!(
                 exchange = exchange.label(),
                 price,
@@ -120,6 +121,7 @@ impl OutlierGate {
                 threshold = self.cfg.z_threshold,
                 "cross-exchange outlier rejected"
             );
+            */
             return false;
         }
 
