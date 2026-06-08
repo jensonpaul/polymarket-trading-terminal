@@ -101,7 +101,13 @@ impl PredictionStrategy for HypeReversionStrategy {
              er1s={:.3} er5s={:.3} er10s={:.3} er30s={:.3} erFull={:.3} \
              persist={:.2} accel={:.5} vol30={:.4} \
              z30={:.2} z60={:.2} z5m={:.2} \
-             rangePos={:.2}",
+             \r\nrangePos={:.2} \
+             rPos30s={:.2} \
+             rPos60s={:.2} \
+             rPos5m={:.2} \
+             rPos10m={:.2} \
+             rPos30m={:.2} \
+             rPos60m={:.2}",
             trend.distance_from_origin_pct,
             trend.efficiency_ratio,
             trend.er_1s,
@@ -116,6 +122,12 @@ impl PredictionStrategy for HypeReversionStrategy {
             trend.z_score_60,
             trend.z_score_5m,
             trend.range_position,
+            trend.range_position_30s,
+            trend.range_position_60s,
+            trend.range_position_5m,
+            trend.range_position_10m,
+            trend.range_position_30m,
+            trend.range_position_60m,
         );
 
         Some(PredictionSignal {

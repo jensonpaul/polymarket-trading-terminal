@@ -83,7 +83,7 @@ impl BtcFeed {
             window_state,
             market_cache: Arc::new(Mutex::new(HashMap::new())),
             window: Arc::new(RwLock::new(RollingWindow::new(
-                Duration::from_secs(300),
+                Duration::from_secs(60 * 60),
             ))),
         }
     }
@@ -204,6 +204,11 @@ impl BtcFeed {
         let mut prices_60s: Vec<f64> = Vec::new();
         let mut all_prices: Vec<f64> = Vec::new();
 
+        let mut prices_5m:  Vec<f64> = Vec::new();
+        let mut prices_10m: Vec<f64> = Vec::new();
+        let mut prices_30m: Vec<f64> = Vec::new();
+        let mut prices_60m: Vec<f64> = Vec::new();
+
         for sample in window.iter() {
             if sample.price > high { high = sample.price; }
             if sample.price < low  { low  = sample.price; }
@@ -220,6 +225,11 @@ impl BtcFeed {
             if age_ms <= 10_000 { prices_10s.push(price_f); }
             if age_ms <= 30_000 { prices_30s.push(price_f); }
             if age_ms <= 60_000 { prices_60s.push(price_f); }
+
+            if age_ms <=    300_000 { prices_5m.push(price_f); }
+            if age_ms <=    600_000 { prices_10m.push(price_f); }
+            if age_ms <=  1_800_000 { prices_30m.push(price_f); }
+            if age_ms <=  3_600_000 { prices_60m.push(price_f); }
         }
 
         let high_f = high.to_f64().unwrap_or(current_f);
@@ -229,6 +239,24 @@ impl BtcFeed {
         } else {
             0.5
         };
+
+        let range_position_30s =
+            range_position_over(current_f, &prices_30s);
+
+        let range_position_60s =
+            range_position_over(current_f, &prices_60s);
+
+        let range_position_5m =
+            range_position_over(current_f, &prices_5m);
+
+        let range_position_10m =
+            range_position_over(current_f, &prices_10m);
+
+        let range_position_30m =
+            range_position_over(current_f, &prices_30m);
+
+        let range_position_60m =
+            range_position_over(current_f, &prices_60m);
 
         let net_displacement = ws.btc_distance_from_origin_pct.abs();
         let efficiency_ratio = if ws.btc_path_length > 0.0 {
@@ -297,6 +325,12 @@ impl BtcFeed {
             high_5m: high,
             low_5m:  low,
             range_position,
+            range_position_30s,
+            range_position_60s,
+            range_position_5m,
+            range_position_10m,
+            range_position_30m,
+            range_position_60m,
         }
     }
 }
@@ -461,4 +495,27 @@ fn efficiency_ratio_over(prices: &[f64]) -> f64 {
     let net  = (prices.last().unwrap() - prices.first().unwrap()).abs();
     let path: f64 = prices.windows(2).map(|w| (w[1] - w[0]).abs()).sum();
     if path > 0.0 { (net / path).min(1.0) } else { 0.0 }
+}
+
+fn range_position_over(
+    current: f64,
+    prices: &[f64],
+) -> f64 {
+    if prices.is_empty() {
+        return 0.5;
+    }
+
+    let mut high = f64::MIN;
+    let mut low  = f64::MAX;
+
+    for p in prices {
+        high = high.max(*p);
+        low  = low.min(*p);
+    }
+
+    if high > low {
+        (current - low) / (high - low)
+    } else {
+        0.5
+    }
 }

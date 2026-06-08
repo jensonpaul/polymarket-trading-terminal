@@ -76,6 +76,13 @@ pub struct BtcTrend {
     /// Where BTC sits within its 5-minute high/low band.
     /// 0.0 = at the 5m low, 1.0 = at the 5m high.
     pub range_position: f64,
+
+    pub range_position_30s: f64,
+    pub range_position_60s: f64,
+    pub range_position_5m: f64,
+    pub range_position_10m: f64,
+    pub range_position_30m: f64,
+    pub range_position_60m: f64,
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -136,6 +143,12 @@ impl MarketAnalyzer {
             momentum_persistence: btc.momentum_persistence,
             avg_distance_from_origin: btc.avg_distance_from_origin,
             range_position: btc.range_position,
+            range_position_30s: btc.range_position_30s,
+            range_position_60s: btc.range_position_60s,
+            range_position_5m: btc.range_position_5m,
+            range_position_10m: btc.range_position_10m,
+            range_position_30m: btc.range_position_30m,
+            range_position_60m: btc.range_position_60m,
         })
     }
 

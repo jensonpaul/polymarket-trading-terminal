@@ -98,9 +98,36 @@ pub struct BtcFeatures {
     pub high_5m: Decimal,
     pub low_5m: Decimal,
 
+    /*
+    pub high_30s: Decimal,
+    pub low_30s: Decimal,
+
+    pub high_60s: Decimal,
+    pub low_60s: Decimal,
+
+    pub high_5m: Decimal,
+    pub low_5m: Decimal,
+
+    pub high_10m: Decimal,
+    pub low_10m: Decimal,
+
+    pub high_30m: Decimal,
+    pub low_30m: Decimal,
+
+    pub high_60m: Decimal,
+    pub low_60m: Decimal,
+    */
+
     /// Where BTC's current price sits within its 5-minute high/low range.
     /// 0.0 = at the 5m low, 1.0 = at the 5m high.
     pub range_position: f64,
+
+    pub range_position_30s: f64,
+    pub range_position_60s: f64,
+    pub range_position_5m: f64,
+    pub range_position_10m: f64,
+    pub range_position_30m: f64,
+    pub range_position_60m: f64,
 }
 
 #[derive(Debug, Clone, Default)]
