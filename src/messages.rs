@@ -60,10 +60,10 @@ pub enum UiCommand {
     CancelAllInWindow { window_ts: u64 },
 
     /// Start the live market-price feed for a 5-min window.
-    StartMarketFeed { window_ts: u64, slug: String },
+    EnsureFeed { window_ts: u64, slug: String },
 
     /// Stop and discard the feed for a window.
-    StopMarketFeed { window_ts: u64 },
+    ReleaseFeed { window_ts: u64 },
 
     CloseWindow { window_ts: u64 },
 }

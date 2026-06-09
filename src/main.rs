@@ -13,9 +13,18 @@ use tracing_subscriber::{
     fmt::writer::MakeWriterExt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter,
 };
 
+use alloy::signers::Signer as _;
+use std::str::FromStr;
+use std::sync::Arc;
+use alloy::signers::local::LocalSigner;
+use polymarket_client_sdk_v2::types::{Address, U256};
+use polymarket_client_sdk_v2::clob::{Client as ClobClient, Config};
+use polymarket_client_sdk_v2::clob::types::SignatureType;
+use polymarket_client_sdk_v2::POLYGON;
+
 use logger::GuiLogger;
 use state::AppState;
-use worker::PolymarketWorker;
+use crate::worker::{AuthenticatedClient, PolymarketWorker};
 use worker_config::PollConfig;
 use ui::PolymarketDashboardApp;
 use prediction::{
@@ -29,6 +38,27 @@ use prediction::strategies::HypeReversionStrategy;
 async fn main() -> anyhow::Result<()> {
     // Ignore a missing .env file.
     let _ = dotenv::dotenv();
+
+    let private_key = std::env::var("PRIVATE_KEY_VAR")?;
+    let host = std::env::var("CLOB_API_URL")
+        .unwrap_or_else(|_| "https://clob.polymarket.com".into());
+    let deposit_wallet = Address::from_str(&std::env::var("DEPOSIT_WALLET")?)?;
+
+    let signer = Arc::new(
+        LocalSigner::from_str(&private_key)?.with_chain_id(Some(POLYGON))
+    );
+
+    //let creds = get_or_fetch_api_creds(private_key, host.clone()).await?;
+
+    let client: Arc<AuthenticatedClient> = Arc::new(
+        ClobClient::new(&host, Config::default())?
+            .authentication_builder(signer.as_ref())
+            .funder(deposit_wallet)
+            .signature_type(SignatureType::Poly1271)
+            //.credentials(creds)
+            .authenticate()
+            .await?
+    );
 
     // ------------------------------------------------------------------
     // Shared state (single source of truth)
@@ -98,6 +128,8 @@ async fn main() -> anyhow::Result<()> {
         ctx: egui::Context::default(), // replaced below
         state: worker_state,
         poll_config: worker_poll_config,
+        client: client.clone(),
+        signer: signer.clone(),
     };
 
     // ------------------------------------------------------------------

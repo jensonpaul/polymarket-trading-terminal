@@ -26,7 +26,6 @@ pub mod widgets;
 pub mod window_matrix;
 
 use std::sync::Arc;
-use std::collections::HashSet;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use eframe::egui;
@@ -93,9 +92,6 @@ pub struct PolymarketDashboardApp {
     // ── display windows (keys into AppState) ───────────────────────────────
     pub windows: Vec<WindowGroup>,
 
-    /// Windows for which we have already sent `StartMarketFeed`.
-    pub feed_started_for: HashSet<u64>,
-
     // ── transient UI state ─────────────────────────────────────────────────
     pub notifications: Vec<ToastNotification>,
     pub auto_refresh_active: bool,
@@ -116,6 +112,8 @@ pub struct PolymarketDashboardApp {
     pub market_shares: String,
     pub market_use_usdc: bool,
     pub market_type_fok: bool,
+
+    pub last_seen_version: u64,
 }
 
 impl PolymarketDashboardApp {
@@ -137,7 +135,6 @@ impl PolymarketDashboardApp {
             bearer_token,
             is_authenticated: false,
             windows: Vec::new(),
-            feed_started_for: HashSet::new(),
             notifications: Vec::new(),
             auto_refresh_active: true,
             interval_inputs: IntervalInputs {
@@ -157,6 +154,7 @@ impl PolymarketDashboardApp {
             market_shares: "0".into(),
             market_use_usdc: true,
             market_type_fok: true,
+            last_seen_version: 0,
         }
     }
 
@@ -207,9 +205,7 @@ impl PolymarketDashboardApp {
                 .iter_mut()
                 .find(|w| w.timestamp_5m == order.window_ts)
             {
-                if !w.order_ids.contains(&order.id) {
-                    w.order_ids.push(order.id.clone());
-                }
+                w.order_ids.push(order.id.clone());
             } else {
                 // Order belongs to a window that hasn't been created yet
                 // (e.g. restored from a previous session).  Create it.
@@ -241,7 +237,6 @@ impl eframe::App for PolymarketDashboardApp {
                 WorkerEvent::WindowClosed { window_ts } => {
                     // Remove the window from UI now that worker has cleaned up
                     self.windows.retain(|w| w.timestamp_5m != window_ts);
-                    self.feed_started_for.remove(&window_ts);
                 }
                 WorkerEvent::Notify { message, kind } => {
                     self.push_toast(message, kind);
@@ -276,12 +271,10 @@ impl eframe::App for PolymarketDashboardApp {
         self.sync_window_order_ids();
 
         // Start the market feed for the current window if not already started.
-        if self.feed_started_for.insert(current_ts) {
-            let _ = self.cmd_tx.try_send(UiCommand::StartMarketFeed {
-                window_ts: current_ts,
-                slug: slug_for_ts(current_ts),
-            });
-        }
+        let _ = self.cmd_tx.try_send(UiCommand::EnsureFeed {
+            window_ts: current_ts,
+            slug: slug_for_ts(current_ts),
+        });
 
         // ------------------------------------------------------------------
         // Compute countdown for top bar
@@ -475,7 +468,15 @@ impl eframe::App for PolymarketDashboardApp {
         // Repaint strategy: event-driven (worker) + 4 FPS idle fallback
         // ------------------------------------------------------------------
         if self.auto_refresh_active {
-            ctx.request_repaint_after(Duration::from_millis(250));
+            let current_version = self.state.version();
+            if current_version != self.last_seen_version {
+                self.last_seen_version = current_version;
+                // state changed this frame — worker already called request_repaint(),
+                // so no extra call needed here
+            } else {
+                // nothing changed; keep the timer alive for the countdown clock only
+                ctx.request_repaint_after(Duration::from_millis(250));
+            }
         }
     }
 }

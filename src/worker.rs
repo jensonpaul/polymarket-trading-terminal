@@ -37,6 +37,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use alloy::signers::Signer as _;
 use alloy::signers::local::LocalSigner;
+use alloy::signers::local::PrivateKeySigner;
 use lazy_static::lazy_static;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::*;
@@ -75,6 +76,7 @@ use crate::worker_config::{Queue, SharedPollConfig};
 // Module-level caches
 // ---------------------------------------------------------------------------
 
+/*
 lazy_static! {
     static ref MARKET_CACHE: std::sync::Mutex<HashMap<String, Market>> =
         std::sync::Mutex::new(HashMap::new());
@@ -82,13 +84,19 @@ lazy_static! {
     static ref CREDS_CACHE: std::sync::Mutex<HashMap<String, Credentials>> =
         std::sync::Mutex::new(HashMap::new());
 }
+*/
+
+use dashmap::DashMap;
+lazy_static! {
+    static ref MARKET_CACHE: DashMap<String, Market> = DashMap::new();
+}
 
 // ---------------------------------------------------------------------------
 // Worker
 // ---------------------------------------------------------------------------
 
-type AuthenticatedClient = ClobClient<Authenticated<Normal>>;
-type SharedClient = AuthenticatedClient;
+pub type AuthenticatedClient = ClobClient<Authenticated<Normal>>;
+pub type SharedClient = Arc<AuthenticatedClient>;
 
 pub struct PolymarketWorker {
     pub cmd_rx: Receiver<UiCommand>,
@@ -96,36 +104,13 @@ pub struct PolymarketWorker {
     pub ctx: egui::Context,
     pub state: SharedAppState,
     pub poll_config: SharedPollConfig,
+    pub client: Arc<AuthenticatedClient>,
+    pub signer: Arc<PrivateKeySigner>,
 }
 
 impl PolymarketWorker {
-    async fn init_client(&self) -> anyhow::Result<AuthenticatedClient> {
-        let private_key = std::env::var("PRIVATE_KEY_VAR")?;
-        let host = std::env::var("CLOB_API_URL")
-            .unwrap_or_else(|_| "https://clob.polymarket.com".into());
-        let deposit_wallet = Address::from_str(&std::env::var("DEPOSIT_WALLET")?)?;
-
-        let signer = LocalSigner::from_str(&private_key)?
-            .with_chain_id(Some(polymarket_client_sdk_v2::POLYGON));
-
-        let creds =
-            get_or_fetch_api_creds(private_key.clone(), host.clone()).await?;
-
-        let client = ClobClient::new(&host, Config::default())?
-            .authentication_builder(&signer)
-            .funder(deposit_wallet)
-            .signature_type(SignatureType::Poly1271)
-            .credentials(creds)
-            .authenticate()
-            .await?;
-
-        Ok(client)
-    }
-
     pub async fn run(mut self) -> anyhow::Result<()> {
         info!("PolymarketWorker: starting");
-
-        let client = self.init_client().await?;
 
         // ------------------------------------------------------------------
         // Shared helpers passed into spawned tasks
@@ -137,7 +122,7 @@ impl PolymarketWorker {
         // Task A: Orders polling loop
         // ------------------------------------------------------------------
         spawn_orders_polling_loop(
-            client.clone(),
+            self.client.clone(),
             Arc::clone(&state),
             ctx.clone(),
             self.poll_config.atomic(Queue::Orders),
@@ -148,7 +133,7 @@ impl PolymarketWorker {
         // Task B: Trades polling loop
         // ------------------------------------------------------------------
         spawn_trades_polling_loop(
-            client.clone(),
+            self.client.clone(),
             Arc::clone(&state),
             ctx.clone(),
             self.poll_config.atomic(Queue::Trades),
@@ -158,7 +143,8 @@ impl PolymarketWorker {
         // Task C: Rapid-sell automation loop
         // ------------------------------------------------------------------
         spawn_rapid_sell_loop(
-            client.clone(),
+            self.client.clone(),
+            (*self.signer).clone(),
             Arc::clone(&state),
             ctx.clone(),
             self.poll_config.atomic(Queue::RapidSell),
@@ -184,7 +170,8 @@ impl PolymarketWorker {
                 }
 
                 UiCommand::PlaceLimit { side, token, price, size, rapid_price, window_ts } => {
-                    let client = client.clone();
+                    let client = self.client.clone();
+                    let signer = (*self.signer).clone();
                     let state = Arc::clone(&state);
                     let ctx = ctx.clone();
                     let event_tx = self.event_tx.clone();
@@ -198,7 +185,7 @@ impl PolymarketWorker {
                             size: size.clone(),
                         };
 
-                        match place_order_limit(client.clone(), &req, &slug).await {
+                        match place_order_limit(client, signer, &req, &slug).await {
                             Ok(resp) => match parse_response(resp) {
                                 Ok(order_id) => {
                                     let order = TrackedOrder {
@@ -247,7 +234,8 @@ impl PolymarketWorker {
                 }
 
                 UiCommand::PlaceMarket { side, token, usdc, shares, order_type, window_ts } => {
-                    let client = client.clone();
+                    let client = self.client.clone();
+                    let signer = (*self.signer).clone();
                     let state = Arc::clone(&state);
                     let ctx = ctx.clone();
                     let event_tx = self.event_tx.clone();
@@ -262,7 +250,7 @@ impl PolymarketWorker {
                             order_type: order_type.clone(),
                         };
 
-                        match place_order_market(client.clone(), &req, &slug).await {
+                        match place_order_market(client, signer, &req, &slug).await {
                             Ok(resp) => match parse_response(resp) {
                                 Ok(order_id) => {
                                     let order = TrackedOrder {
@@ -306,12 +294,12 @@ impl PolymarketWorker {
                 }
 
                 UiCommand::CheckStatus { order_id, window_ts: _ } => {
-                    let client = client.clone();
+                    let client = self.client.clone();
                     let state = Arc::clone(&state);
                     let ctx = ctx.clone();
 
                     tokio::spawn(async move {
-                        if let Ok(info) = get_order_status(client.clone(), &order_id).await {
+                        if let Ok(info) = get_order_status(client, &order_id).await {
                             apply_order_status_update(&state, &order_id, &info, false);
                             state.touch();
                             ctx.request_repaint();
@@ -320,13 +308,13 @@ impl PolymarketWorker {
                 }
 
                 UiCommand::CancelIndividual { order_id, window_ts: _ } => {
-                    let client = client.clone();
+                    let client = self.client.clone();
                     let state = Arc::clone(&state);
                     let ctx = ctx.clone();
                     let event_tx = self.event_tx.clone();
 
                     tokio::spawn(async move {
-                        match cancel_order(client.clone(), &order_id).await {
+                        match cancel_order(client, &order_id).await {
                             Ok(resp) => {
                                 if resp.canceled.contains(&order_id) {
                                     if let Some(mut o) = state.orders.get_mut(&order_id) {
@@ -353,7 +341,7 @@ impl PolymarketWorker {
                 }
 
                 UiCommand::CancelAllInWindow { window_ts } => {
-                    let client = client.clone();
+                    let client = self.client.clone();
                     let state = Arc::clone(&state);
                     let ctx = ctx.clone();
                     let event_tx = self.event_tx.clone();
@@ -366,7 +354,7 @@ impl PolymarketWorker {
                             .map(|entry| entry.key().clone())
                             .collect();
 
-                        match cancel_all_orders(client.clone()).await {
+                        match cancel_all_orders(client).await {
                             Ok(resp) => {
                                 let count = resp.canceled.len();
                                 for id in &local_ids {
@@ -388,9 +376,9 @@ impl PolymarketWorker {
                     });
                 }
 
-                UiCommand::StartMarketFeed { window_ts, slug } => {
+                UiCommand::EnsureFeed { window_ts, slug } => {
                     if state.market_feeds.contains_key(&window_ts) {
-                        info!(window_ts, "feed already running, skipping");
+                        tracing::debug!(window_ts, "feed already running, skipping");
                         continue;
                     }
                     let event_tx = self.event_tx.clone();
@@ -400,7 +388,7 @@ impl PolymarketWorker {
                         .await;
                 }
 
-                UiCommand::StopMarketFeed { window_ts } => {
+                UiCommand::ReleaseFeed { window_ts } => {
                     if let Some((_, handle)) = state.market_feeds.remove(&window_ts) {
                         handle.shutdown.notify_waiters();
                         info!(window_ts, "feed stopped");
@@ -635,8 +623,7 @@ fn spawn_trades_polling_loop(
 
             // Get the market condition_id for this slug
             let condition_id = {
-                let cache = MARKET_CACHE.lock().unwrap();
-                cache.get(&slug).and_then(|m| m.condition_id)
+                MARKET_CACHE.get(&slug).and_then(|m| m.condition_id)
             };
 
             let Some(condition_id) = condition_id else {
@@ -674,6 +661,7 @@ fn spawn_trades_polling_loop(
 
 fn spawn_rapid_sell_loop(
     client: SharedClient,
+    signer: PrivateKeySigner,
     state: SharedAppState,
     ctx: egui::Context,
     interval_cell: Arc<std::sync::atomic::AtomicU64>,
@@ -827,6 +815,7 @@ fn spawn_rapid_sell_loop(
                 let token = order.token.clone();
                 let window_ts = order.window_ts;
                 let rapid_price = order.rapid_sell_price.clone();
+                let signer = signer.clone();
 
                 let attempt = {
                     if let Some(o) = state.orders.get(&order.id) {
@@ -848,7 +837,7 @@ fn spawn_rapid_sell_loop(
                         size: sell_amount.to_string(),
                     };
 
-                    match place_order_limit(client.clone(), &req, &slug).await {
+                    match place_order_limit(client.clone(), signer, &req, &slug).await {
                         Ok(resp) => match parse_response(resp) {
                             Ok(new_id) => {
                                 let sell_order = TrackedOrder {
@@ -1192,25 +1181,17 @@ pub async fn get_or_fetch_token_ids(
 
 #[instrument(skip(client))]
 pub async fn get_or_fetch_market(client: &GammaClient, slug: &str) -> anyhow::Result<Market> {
-    {
-        let cache = MARKET_CACHE.lock().unwrap();
-        if let Some(m) = cache.get(slug) {
-            return Ok(m.clone());
-        }
+    if let Some(m) = MARKET_CACHE.get(slug) {
+        return Ok(m.clone());
     }
-
     let req = MarketBySlugRequest::builder().slug(slug).build();
     let market = client.market_by_slug(&req).await?;
-
-    {
-        let mut cache = MARKET_CACHE.lock().unwrap();
-        cache.clear();
-        cache.insert(slug.to_string(), market.clone());
-    }
-
+    MARKET_CACHE.clear(); // keep single-entry behaviour
+    MARKET_CACHE.insert(slug.to_string(), market.clone());
     Ok(market)
 }
 
+/*
 pub async fn get_or_fetch_api_creds(
     private_key: String,
     host: String,
@@ -1234,17 +1215,15 @@ pub async fn get_or_fetch_api_creds(
     }
     Ok(creds)
 }
+*/
 
 async fn place_order_limit(
     client: SharedClient,
+    signer: PrivateKeySigner,
     payload: &LimitRequest,
     slug: &str,
 ) -> anyhow::Result<PostOrderResponse> {
     let _t = Timer::start("place_limit_total");
-
-    let private_key = std::env::var("PRIVATE_KEY_VAR")?;
-    let signer = LocalSigner::from_str(&private_key)?
-        .with_chain_id(Some(polymarket_client_sdk_v2::POLYGON));
 
     let gamma = GammaClient::default();
     let ids = get_or_fetch_token_ids(&gamma, slug).await?;
@@ -1272,13 +1251,10 @@ async fn place_order_limit(
 
 async fn place_order_market(
     client: SharedClient,
+    signer: PrivateKeySigner,
     payload: &MarketRequest,
     slug: &str,
 ) -> anyhow::Result<PostOrderResponse> {
-    let private_key = std::env::var("PRIVATE_KEY_VAR")?;
-    let signer = LocalSigner::from_str(&private_key)?
-        .with_chain_id(Some(polymarket_client_sdk_v2::POLYGON));
-
     let gamma = GammaClient::default();
     let ids = get_or_fetch_token_ids(&gamma, slug).await?;
     anyhow::ensure!(ids.len() >= 2, "no token IDs for slug {slug}");
