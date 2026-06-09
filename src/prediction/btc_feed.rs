@@ -33,8 +33,6 @@ use tokio::time;
 use tonic::transport::Channel;
 use tracing::{error, info, warn};
 
-use polymarket_client_sdk_v2::gamma::types::response::Market;
-
 use crate::state::{slug_for_ts, stamp_5m};
 use crate::prediction::{BtcFeatures, BtcSample, RollingWindow, WindowState};
 use crate::prediction::btc_aggregator::{
@@ -47,8 +45,6 @@ pub mod proto {
 }
 
 use proto::orderbook_aggregator_client::OrderbookAggregatorClient;
-
-pub type MarketCache = Arc<Mutex<HashMap<String, Market>>>;
 
 #[derive(Debug, Clone, Default)]
 pub struct BtcSnapshot {
@@ -68,7 +64,6 @@ pub struct BtcFeed {
     window:       Arc<RwLock<RollingWindow<BtcSample>>>,
     snapshot:     SharedBtcSnapshot,
     window_state: Arc<RwLock<WindowState>>,
-    pub market_cache: MarketCache,
 }
 
 impl BtcFeed {
@@ -81,7 +76,6 @@ impl BtcFeed {
             port,
             snapshot,
             window_state,
-            market_cache: Arc::new(Mutex::new(HashMap::new())),
             window: Arc::new(RwLock::new(RollingWindow::new(
                 Duration::from_secs(60 * 60),
             ))),

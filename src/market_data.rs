@@ -1,11 +1,14 @@
 //! # Market Data Feed
 //!
 //! Spawns one Tokio task per 5-minute window.  The task subscribes to the
-//! Polymarket WebSocket and atomically updates `AppState::market_prices[window_ts]`
-//! on every trade-price tick.
+//! Polymarket WebSocket and emits [`crate::events::AppEvent`]s through the
+//! [`crate::events::EventBus`] on every price tick or connection change.
 //!
-//! The caller signals shutdown via `MarketFeedHandle::shutdown` (a
-//! `tokio::sync::Notify`).
+//! **No direct state writes happen here.**  All mutations go through
+//! [`crate::reducer::apply`] in the UI drain loop.
+//!
+//! The caller signals shutdown via `MarketFeedHandle::shutdown`
+//! (a `tokio::sync::Notify`).
 
 use std::str::FromStr;
 use std::sync::Arc;
@@ -20,7 +23,8 @@ use polymarket_client_sdk_v2::gamma::Client as GammaClient;
 use polymarket_client_sdk_v2::types::U256;
 use rust_decimal::prelude::ToPrimitive;
 
-use crate::state::{AppState, MarketFeedHandle, MarketPrices, SharedAppState, SharedMarketPrices};
+use crate::events::{AppEvent, EventBus};
+use crate::state::{MarketFeedHandle, MarketPrices, SharedAppState, SharedMarketPrices};
 use crate::worker::get_or_fetch_token_ids;
 
 const STALE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -28,21 +32,22 @@ const STALE_CHECK_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Create and register a live price feed for `window_ts`.
 ///
-/// 1. Inserts a default (stale) `SharedMarketPrices` into `state.market_prices`.
-/// 2. Spawns a Tokio task that connects to the WS feed and updates the price
-///    snapshot atomically.
-/// 3. Stores a `MarketFeedHandle` in `state.market_feeds` so the caller can
-///    shut it down later.
+/// 1. Inserts a default (stale) [`SharedMarketPrices`] into
+///    `state.market_prices` so the UI can display a loading state immediately.
+/// 2. Spawns a Tokio task that connects to the WS feed and emits
+///    [`AppEvent::PriceTick`] / [`AppEvent::FeedStatusChanged`] events.
+/// 3. Stores a [`MarketFeedHandle`] in `state.market_feeds` so the caller
+///    can shut it down.
 ///
-/// This function is intentionally `async fn` — the caller should `.await` it
-/// but it returns immediately after spawning (the task runs independently).
+/// Intentionally `async fn` — the caller should `.await` it but it returns
+/// immediately after spawning (the feed task runs independently).
 pub async fn start_market_feed(
     window_ts: u64,
     slug: String,
     state: SharedAppState,
-    ctx: egui::Context,
+    bus: EventBus,
 ) {
-    // Initialise a stale price snapshot in shared state.
+    // Initialise a stale price snapshot so the UI has something to display.
     let prices: SharedMarketPrices = Arc::new(ArcSwap::from_pointee(MarketPrices::default()));
     state.market_prices.insert(window_ts, prices.clone());
 
@@ -53,14 +58,22 @@ pub async fn start_market_feed(
             shutdown: shutdown.clone(),
         },
     );
-    state.touch();
-    ctx.request_repaint();
+
+    // Emit initial stale status so the UI can show a connecting indicator.
+    let _ = bus
+        .send(AppEvent::FeedStatusChanged {
+            window_ts,
+            connected: false,
+            stale: true,
+            error: None,
+        })
+        .await;
 
     tokio::spawn(async move {
         info!(%window_ts, %slug, "market feed task started");
 
         // ------------------------------------------------------------------
-        // Fetch token IDs (with shutdown-aware retry)
+        // Fetch token IDs (shutdown-aware retry)
         // ------------------------------------------------------------------
         let gamma = GammaClient::default();
 
@@ -74,8 +87,8 @@ pub async fn start_market_feed(
                 res = get_or_fetch_token_ids(&gamma, &slug) => {
                     match res {
                         Ok(ids) if ids.len() >= 2 => break ids,
-                        Ok(_) => error!(%slug, "token IDs count < 2"),
-                        Err(e) => error!(%slug, error=%e, "failed to fetch token IDs"),
+                        Ok(_)   => error!(%slug, "token IDs count < 2"),
+                        Err(e)  => error!(%slug, error=%e, "failed to fetch token IDs"),
                     }
                 }
             }
@@ -83,39 +96,57 @@ pub async fn start_market_feed(
         };
 
         let asset_ids: Vec<U256> = match token_ids.iter().map(|id| U256::from_str(id)).collect() {
-            Ok(v) => v,
+            Ok(v)  => v,
             Err(e) => {
                 error!(%slug, error=%e, "asset ID conversion failed");
                 return;
             }
         };
 
-        let up_asset_id = Arc::<str>::from(token_ids[0].as_str());
+        let up_asset_id   = Arc::<str>::from(token_ids[0].as_str());
         let down_asset_id = Arc::<str>::from(token_ids[1].as_str());
 
-        // Mark as connected with real asset IDs.
+        // Store asset IDs into the local prices snapshot so the reducer's
+        // PriceTick arm can route up/down correctly.  We do one direct write
+        // here to initialise the asset-ID fields — the reducer does not carry
+        // them in the event payload to avoid redundancy.
         prices.store(Arc::new(MarketPrices {
-            up_asset_id: up_asset_id.clone(),
+            up_asset_id:   up_asset_id.clone(),
             down_asset_id: down_asset_id.clone(),
-            connected: true,
-            stale: false,
+            connected:     false,
+            stale:         true,
             ..Default::default()
         }));
-        state.touch();
-        ctx.request_repaint();
+
+        let _ = bus
+            .send(AppEvent::FeedStatusChanged {
+                window_ts,
+                connected: true,
+                stale: false,
+                error: None,
+            })
+            .await;
 
         // ------------------------------------------------------------------
-        // Subscribe to WebSocket feed
+        // Subscribe to WebSocket
         // ------------------------------------------------------------------
         let ws = WsClient::default();
         let stream = match ws.subscribe_last_trade_price(asset_ids) {
-            Ok(s) => s,
+            Ok(s)  => s,
             Err(e) => {
                 error!(%slug, error=%e, "WS subscribe failed");
+                let _ = bus
+                    .send(AppEvent::FeedStatusChanged {
+                        window_ts,
+                        connected: false,
+                        stale: true,
+                        error: Some(e.to_string()),
+                    })
+                    .await;
                 return;
             }
         };
-        let mut stream = Box::pin(stream);
+        let mut stream      = Box::pin(stream);
         let mut last_update = tokio::time::Instant::now();
 
         // ------------------------------------------------------------------
@@ -127,74 +158,82 @@ pub async fn start_market_feed(
 
                 _ = shutdown.notified() => {
                     info!(%window_ts, "market feed shut down");
-                    // Clean up shared state so the UI doesn't show a stale
-                    // price widget for a dead feed.
-                    state.market_prices.remove(&window_ts);
-                    state.touch();
-                    ctx.request_repaint();
+                    // Cleanup is handled by the reducer's WindowClosed arm.
                     return;
                 }
 
                 maybe_msg = stream.next() => {
                     match maybe_msg {
                         Some(Ok(msg)) => {
-                            let ts = msg.timestamp as u64;
+                            let ts    = msg.timestamp as u64;
                             let price = msg.price.to_f64().unwrap_or(0.0);
                             let asset = msg.asset_id.to_string();
 
-                            let mut snap = prices.load().as_ref().clone();
+                            // Read local snapshot to route up/down and
+                            // check for out-of-order ticks before emitting.
+                            let snap = prices.load();
                             if ts <= snap.last_ts {
                                 continue;
                             }
 
-                            snap.last_ts = ts;
-                            snap.connected = true;
-                            snap.stale = false;
-                            snap.error = None;
-
-                            if asset == snap.up_asset_id.as_ref() {
-                                snap.up_price = price;
+                            let (up_price, down_price) = if asset == snap.up_asset_id.as_ref() {
+                                (price, snap.down_price)
                             } else if asset == snap.down_asset_id.as_ref() {
-                                snap.down_price = price;
-                            }
+                                (snap.up_price, price)
+                            } else {
+                                continue; // unknown asset
+                            };
 
-                            prices.store(Arc::new(snap));
                             last_update = tokio::time::Instant::now();
-                            state.touch();
-                            ctx.request_repaint();
+
+                            let _ = bus
+                                .send(AppEvent::PriceTick {
+                                    window_ts,
+                                    up_price,
+                                    down_price,
+                                    last_ts: ts,
+                                })
+                                .await;
                         }
 
                         Some(Err(e)) => {
                             warn!(%slug, error=%e, "stream error (SDK may reconnect)");
-                            let mut snap = prices.load().as_ref().clone();
-                            snap.stale = true;
-                            snap.error = Some(Arc::from(e.to_string().as_str()));
-                            prices.store(Arc::new(snap));
-                            state.touch();
-                            ctx.request_repaint();
+                            let _ = bus
+                                .send(AppEvent::FeedStatusChanged {
+                                    window_ts,
+                                    connected: false,
+                                    stale: true,
+                                    error: Some(e.to_string()),
+                                })
+                                .await;
                         }
 
                         None => {
                             warn!(%slug, "stream ended unexpectedly");
-                            let mut snap = prices.load().as_ref().clone();
-                            snap.stale = true;
-                            snap.error = Some(Arc::from("stream ended"));
-                            prices.store(Arc::new(snap));
-                            state.touch();
-                            ctx.request_repaint();
+                            let _ = bus
+                                .send(AppEvent::FeedStatusChanged {
+                                    window_ts,
+                                    connected: false,
+                                    stale: true,
+                                    error: Some("stream ended".into()),
+                                })
+                                .await;
                         }
                     }
                 }
 
                 _ = tokio::time::sleep(STALE_CHECK_INTERVAL) => {
                     if last_update.elapsed() > STALE_TIMEOUT {
-                        let mut snap = prices.load().as_ref().clone();
+                        let snap = prices.load();
                         if !snap.stale {
-                            snap.stale = true;
-                            snap.connected = false;
-                            prices.store(Arc::new(snap));
-                            state.touch();
-                            ctx.request_repaint();
+                            let _ = bus
+                                .send(AppEvent::FeedStatusChanged {
+                                    window_ts,
+                                    connected: false,
+                                    stale: true,
+                                    error: None,
+                                })
+                                .await;
                         }
                     }
                 }

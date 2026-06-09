@@ -1,17 +1,17 @@
 //! # GUI Logger
 //!
-//! A `tracing_subscriber::Layer` that forwards log events to the notification
-//! toast queue via a `WorkerEvent::Notify` message.
+//! A `tracing_subscriber::Layer` that forwards log events to the toast queue
+//! via [`crate::events::AppEvent::Notify`] on the [`crate::events::EventBus`].
 
 use tokio::sync::mpsc::Sender;
 use tracing::field::Visit;
 use tracing_subscriber::Layer;
 
-use crate::messages::WorkerEvent;
+use crate::events::{AppEvent, EventBus};
 use crate::state::NotificationKind;
 
 pub struct GuiLogger {
-    pub tx: Sender<WorkerEvent>,
+    pub tx: EventBus,
 }
 
 struct MsgVisitor {
@@ -41,10 +41,10 @@ where
         event: &tracing::Event<'_>,
         _ctx: tracing_subscriber::layer::Context<'_, S>,
     ) {
-        let meta = event.metadata();
+        let meta   = event.metadata();
+        let target = meta.target();
 
         // Skip framework internals to prevent recursion / noise.
-        let target = meta.target();
         if target.starts_with("tokio")
             || target.starts_with("runtime")
             || target.starts_with("eframe")
@@ -62,15 +62,15 @@ where
 
         let kind = match *meta.level() {
             tracing::Level::ERROR => NotificationKind::Error,
-            tracing::Level::WARN => NotificationKind::Warning,
-            tracing::Level::INFO => NotificationKind::Info,
+            tracing::Level::WARN  => NotificationKind::Warning,
+            tracing::Level::INFO  => NotificationKind::Info,
             tracing::Level::DEBUG => NotificationKind::Debug,
             tracing::Level::TRACE => NotificationKind::Trace,
         };
 
-        // Non-blocking: if the channel is full we silently drop the event
-        // rather than stalling a tracing call-site.
-        let _ = self.tx.try_send(WorkerEvent::Notify {
+        // Non-blocking: drop the event if the channel is full rather than
+        // stalling the tracing call-site.
+        let _ = self.tx.try_send(AppEvent::Notify {
             message: visitor.msg,
             kind,
         });

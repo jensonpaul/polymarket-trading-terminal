@@ -1,7 +1,9 @@
+mod events;
 mod logger;
 mod market_data;
 mod messages;
 mod prediction;
+mod reducer;
 mod state;
 mod ui;
 mod worker;
@@ -22,6 +24,7 @@ use polymarket_client_sdk_v2::clob::{Client as ClobClient, Config};
 use polymarket_client_sdk_v2::clob::types::SignatureType;
 use polymarket_client_sdk_v2::POLYGON;
 
+use events::event_channel;
 use logger::GuiLogger;
 use state::AppState;
 use crate::worker::{AuthenticatedClient, PolymarketWorker};
@@ -75,11 +78,11 @@ async fn main() -> anyhow::Result<()> {
     // ------------------------------------------------------------------
     // Communication channels
     //
-    // cmd_tx/cmd_rx : UI  → Worker  (user intentions requiring async I/O)
-    // event_tx/event_rx : Worker → UI  (notifications, lifecycle signals)
+    // cmd_tx/cmd_rx   : UI → Worker  (user intentions requiring async I/O)
+    // event_bus/event_rx : Worker/tasks → UI  (all AppEvents)
     // ------------------------------------------------------------------
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<messages::UiCommand>(128);
-    let (event_tx, event_rx) = tokio::sync::mpsc::channel::<messages::WorkerEvent>(256);
+    let (event_bus, event_rx) = event_channel(512);
 
     // ------------------------------------------------------------------
     // Poll intervals (shared atomically; no message passing needed for reads)
@@ -105,13 +108,13 @@ async fn main() -> anyhow::Result<()> {
     let stdout_layer = tracing_subscriber::fmt::layer().with_level(true);
 
     // GuiLogger forwards ERROR/WARN events to the toast queue.
-    let gui_layer = GuiLogger { tx: event_tx.clone() };
+    let gui_layer = GuiLogger { tx: event_bus.clone() };
 
     tracing_subscriber::registry()
         .with(env_filter)
         .with(stdout_layer)
         .with(file_layer)
-        .with(gui_layer)
+        //.with(gui_layer)
         .init();
 
     tracing::info!("Polymarket Trading Terminal starting");
@@ -124,8 +127,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mut worker = PolymarketWorker {
         cmd_rx,
-        event_tx,
-        ctx: egui::Context::default(), // replaced below
+        bus: event_bus,
         state: worker_state,
         poll_config: worker_poll_config,
         client: client.clone(),
@@ -149,10 +151,6 @@ async fn main() -> anyhow::Result<()> {
         "Polymarket Trading Terminal",
         native_options,
         Box::new(move |cc| {
-            // Give the worker the real egui context so it can call
-            // `ctx.request_repaint()` from async tasks.
-            worker.ctx = cc.egui_ctx.clone();
-
             tokio::spawn(async move {
                 if let Err(e) = worker.run().await {
                     tracing::error!("Worker exited with error: {e:#}");

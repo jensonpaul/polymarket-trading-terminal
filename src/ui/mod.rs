@@ -4,10 +4,13 @@
 //!
 //! ## Repaint strategy
 //!
-//! The worker calls `ctx.request_repaint()` after every state mutation.
-//! The UI falls back to `ctx.request_repaint_after(250 ms)` when idle so the
-//! countdown timer stays live without burning CPU.  The old 33 ms unconditional
-//! loop is gone.
+//!The UI owns the EventReceiver and drains all pending AppEvents
+//!every frame.
+//!Each event is applied through reducer::apply(). If any event dirties
+//!AppState, the UI calls ctx.request_repaint() exactly once.
+//!When idle, the UI falls back to
+//!ctx.request_repaint_after(Duration::from_millis(250))
+//!so countdown timers remain live without busy-looping.
 //!
 //! ## UI state vs shared state
 //!
@@ -34,7 +37,9 @@ use rust_decimal::prelude::FromStr;
 use rust_decimal::RoundingStrategy;
 use tokio::sync::mpsc::{Receiver, Sender};
 
-use crate::messages::{UiCommand, WorkerEvent};
+use crate::events::{AppEvent, EventReceiver};
+use crate::messages::UiCommand;
+use crate::reducer::apply;
 use crate::state::{
     NotificationKind, SharedAppState, ToastNotification, WindowGroup, slug_for_ts, stamp_5m,
 };
@@ -83,7 +88,7 @@ pub struct PolymarketDashboardApp {
 
     // ── channels ───────────────────────────────────────────────────────────
     pub cmd_tx: Sender<UiCommand>,
-    pub event_rx: Receiver<WorkerEvent>,
+    pub event_rx: EventReceiver,
 
     // ── auth ───────────────────────────────────────────────────────────────
     pub bearer_token: String,
@@ -120,7 +125,7 @@ impl PolymarketDashboardApp {
     pub fn new(
         _cc: &eframe::CreationContext<'_>,
         cmd_tx: Sender<UiCommand>,
-        event_rx: Receiver<WorkerEvent>,
+        event_rx: EventReceiver,
         state: SharedAppState,
         prediction_state: Arc<PredictionStore>,
         poll_config: SharedPollConfig,
@@ -233,19 +238,25 @@ impl eframe::App for PolymarketDashboardApp {
         // Drain worker events (notifications; feed-started signals)
         // ------------------------------------------------------------------
         while let Ok(event) = self.event_rx.try_recv() {
-            match event {
-                WorkerEvent::WindowClosed { window_ts } => {
-                    // Remove the window from UI now that worker has cleaned up
-                    self.windows.retain(|w| w.timestamp_5m != window_ts);
+            // Apply to shared state
+            let dirty = apply(&self.state, &event);
+
+            // React to specific events for UI-local state
+            match &event {
+                AppEvent::WindowOpened { window_ts, .. } => {
+                    self.ensure_window(*window_ts);
                 }
-                WorkerEvent::Notify { message, kind } => {
-                    self.push_toast(message, kind);
+                AppEvent::WindowClosed { window_ts } => {
+                    self.windows.retain(|w| w.timestamp_5m != *window_ts);
                 }
-                WorkerEvent::MarketFeedStarted { window_ts } => {
-                    // The prices ArcSwap is already in AppState::market_prices.
-                    // Nothing extra needed here; the window_matrix reads it directly.
-                    tracing::debug!(window_ts, "market feed ready signal received");
+                AppEvent::Notify { message, kind } => {
+                    self.push_toast(message.clone(), kind.clone());
                 }
+                _ => {}
+            }
+
+            if dirty {
+                ctx.request_repaint();
             }
         }
 
@@ -265,16 +276,8 @@ impl eframe::App for PolymarketDashboardApp {
         // ------------------------------------------------------------------
         let current_ts = stamp_5m();
 
-        self.ensure_window(current_ts);
-
         // Keep window order-ID lists in sync with shared state.
         self.sync_window_order_ids();
-
-        // Start the market feed for the current window if not already started.
-        let _ = self.cmd_tx.try_send(UiCommand::EnsureFeed {
-            window_ts: current_ts,
-            slug: slug_for_ts(current_ts),
-        });
 
         // ------------------------------------------------------------------
         // Compute countdown for top bar

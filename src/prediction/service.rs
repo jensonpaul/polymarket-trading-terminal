@@ -13,11 +13,9 @@ use polymarket_client_sdk_v2::{
 use tokio::sync::RwLock;
 use tracing::{error, info};
 
-use polymarket_client_sdk_v2::gamma::types::response::Market;
-
 use crate::{
     prediction::{
-        btc_feed::{BtcFeed, BtcSnapshot, MarketCache},
+        btc_feed::{BtcFeed, BtcSnapshot},
         polymarket_feed::{MarketAssets, PolymarketFeed},
         PolymarketFeatures,
         PredictionContext,
@@ -104,13 +102,10 @@ impl PredictionService {
 
                 match get_or_fetch_market(&gamma, &slug).await {
                     Ok(market) => {
-                        if let Ok(mut cache) = self.btc_feed.market_cache.lock() {
-                            cache.insert(slug.clone(), market.clone());
-                        }
+                        // market data available
                     }
-
                     Err(e) => {
-                        tracing::warn!("market cache failed!");
+                        tracing::warn!("market data fetch failed!");
                     }
                 }
 

@@ -1,7 +1,7 @@
 [package]
 name = "polymarket-trading-terminal"
 description = "Polymarket Trading Terminal"
-version = "0.3.0"
+version = "0.4.0"
 authors = [
     "Jenson Paul <jensonpaul@cdk.cd>",
 ]
