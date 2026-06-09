@@ -161,7 +161,6 @@ async fn main() -> anyhow::Result<()> {
             // Start prediction subsystem
             // ------------------------------------------------------------------
             let prediction_store = std::sync::Arc::clone(&prediction_state);
-            let prediction_ctx = cc.egui_ctx.clone();
 
             tokio::spawn(async move {
                 let engine = PredictionEngine::new()
@@ -170,7 +169,6 @@ async fn main() -> anyhow::Result<()> {
                 let service = PredictionService::new(
                     prediction_store,
                     engine,
-                    prediction_ctx,
                 );
 
                 if let Err(e) = service.run().await {

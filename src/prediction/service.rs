@@ -33,7 +33,6 @@ const MAX_SIGNAL_AGE_MS: u64 = 30_000;
 pub struct PredictionService {
     state: Arc<PredictionStore>,
     engine: PredictionEngine,
-    ctx: egui::Context,
 
     btc_feed: Arc<BtcFeed>,
     polymarket_feed: Arc<PolymarketFeed>,
@@ -43,7 +42,6 @@ impl PredictionService {
     pub fn new(
         state: Arc<PredictionStore>,
         engine: PredictionEngine,
-        ctx: egui::Context,
     ) -> Self {
         let btc_snapshot = Arc::new(ArcSwap::from_pointee(
             BtcSnapshot::default(),
@@ -67,7 +65,6 @@ impl PredictionService {
         Self {
             state,
             engine,
-            ctx,
             btc_feed,
             polymarket_feed,
         }
@@ -267,8 +264,6 @@ impl PredictionService {
             for key in stale {
                 self.state.clear_signal(key, now_ms);
             }
-
-            self.ctx.request_repaint();
 
             tokio::time::sleep(POLL_INTERVAL).await;
         }
