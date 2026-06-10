@@ -105,7 +105,7 @@ impl BtcFeed {
     }
 
     async fn connect(&self) -> anyhow::Result<OrderbookAggregatorClient<Channel>> {
-        let addr = format!("http://[::1]:{}", self.port);
+        let addr = format!("http://0.0.0.0:{}", self.port);
         Ok(OrderbookAggregatorClient::connect(addr).await?)
     }
 
