@@ -21,11 +21,14 @@ use crate::{
         PredictionContext,
         PredictionEngine,
         PredictionStore,
+        strategies::{HypeReversionStrategy, ConvictionFollowStrategy},
         WindowState,
     },
     state::{slug_for_ts, stamp_5m},
     worker::{get_or_fetch_token_ids, get_or_fetch_market},
 };
+
+use btc_prediction_engine::prelude::*;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_SIGNAL_AGE_MS: u64 = 30_000;
@@ -36,6 +39,8 @@ pub struct PredictionService {
 
     btc_feed: Arc<BtcFeed>,
     polymarket_feed: Arc<PolymarketFeed>,
+
+    btc_prediction_snapshot: Arc<RwLock<Option<PredictionSnapshot>>>,
 }
 
 impl PredictionService {
@@ -62,16 +67,82 @@ impl PredictionService {
             Arc::clone(&window_state),
         ));
 
+        let btc_prediction_snapshot =
+            Arc::new(RwLock::new(None));
+
         Self {
             state,
             engine,
             btc_feed,
             polymarket_feed,
+            btc_prediction_snapshot,
         }
     }
 
     pub async fn run(mut self) -> anyhow::Result<()> {
         info!("PredictionService starting");
+
+        // --------------------------------------------------------------
+        // External BTC snappshot prediction
+        // --------------------------------------------------------------
+
+        let (btc_engine, _handles) =
+            btc_prediction_engine::prelude::PredictionEngine::start(
+                EngineConfig::default(),
+            )
+            .await;
+
+        btc_engine.add_feed(
+            FeedConfig::public(
+                Exchange::Binance,
+                Symbol::BtcUsd,
+            ),
+        );
+
+        btc_engine.add_feed(
+            FeedConfig::public(
+                Exchange::Kraken,
+                Symbol::BtcUsd,
+            ),
+        );
+
+        btc_engine.add_feed(
+            FeedConfig::public(
+                Exchange::Bitstamp,
+                Symbol::BtcUsd,
+            ),
+        );
+
+        let mut rx = btc_engine.subscribe();
+
+        {
+            let snapshot =
+                Arc::clone(&self.btc_prediction_snapshot);
+
+            tokio::spawn(async move {
+                while let Ok(prediction) = rx.recv().await {
+                    *snapshot.write().await = Some(prediction);
+                }
+            });
+        }
+
+        // --------------------------------------------------------------
+
+        self.engine.register(
+            ConvictionFollowStrategy::new()
+        );
+
+        self.engine.register(
+            HypeReversionStrategy::new()
+        );
+
+        /*
+        self.engine.register(
+            ExternalBtcStrategy::new(
+                Arc::clone(&self.btc_prediction_snapshot),
+            )
+        );
+        */
 
         let btc_feed = Arc::clone(&self.btc_feed);
         tokio::spawn(async move {
@@ -195,12 +266,19 @@ impl PredictionService {
                 .await
                 .unwrap_or_default();
 
+            let external_prediction =
+                self.btc_prediction_snapshot
+                    .read()
+                    .await
+                    .clone();
+
             let prediction_ctx = PredictionContext {
                 timestamp_ms: chrono::Utc::now()
                     .timestamp_millis() as u64,
                 btc,
                 polymarket: PolymarketFeatures { up, down },
                 seconds_remaining,
+                external_prediction
             };
 
             if let Some(signal) =

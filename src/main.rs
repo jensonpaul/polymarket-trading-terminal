@@ -35,7 +35,6 @@ use prediction::{
     PredictionEngine,
     PredictionService,
 };
-use prediction::strategies::HypeReversionStrategy;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -66,12 +65,12 @@ async fn main() -> anyhow::Result<()> {
     // ------------------------------------------------------------------
     // Shared state (single source of truth)
     // ------------------------------------------------------------------
-    let app_state = std::sync::Arc::new(AppState::new());
+    let app_state = Arc::new(AppState::new());
 
     // ------------------------------------------------------------------
     // Prediction state
     // ------------------------------------------------------------------
-    let prediction_state = std::sync::Arc::new(
+    let prediction_state = Arc::new(
         PredictionStore::new()
     );
 
@@ -87,7 +86,7 @@ async fn main() -> anyhow::Result<()> {
     // ------------------------------------------------------------------
     // Poll intervals (shared atomically; no message passing needed for reads)
     // ------------------------------------------------------------------
-    let poll_config = std::sync::Arc::new(PollConfig::new());
+    let poll_config = Arc::new(PollConfig::new());
 
     // ------------------------------------------------------------------
     // Telemetry
@@ -122,8 +121,8 @@ async fn main() -> anyhow::Result<()> {
     // ------------------------------------------------------------------
     // Build the worker (ctx will be injected inside eframe callback)
     // ------------------------------------------------------------------
-    let worker_state = std::sync::Arc::clone(&app_state);
-    let worker_poll_config = std::sync::Arc::clone(&poll_config);
+    let worker_state = Arc::clone(&app_state);
+    let worker_poll_config = Arc::clone(&poll_config);
 
     let mut worker = PolymarketWorker {
         cmd_rx,
@@ -160,11 +159,10 @@ async fn main() -> anyhow::Result<()> {
             // ------------------------------------------------------------------
             // Start prediction subsystem
             // ------------------------------------------------------------------
-            let prediction_store = std::sync::Arc::clone(&prediction_state);
+            let prediction_store = Arc::clone(&prediction_state);
 
             tokio::spawn(async move {
-                let engine = PredictionEngine::new()
-                    .with_strategy(HypeReversionStrategy::new());
+                let engine = PredictionEngine::new();
 
                 let service = PredictionService::new(
                     prediction_store,

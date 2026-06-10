@@ -77,6 +77,13 @@ impl PredictionStrategy for HypeReversionStrategy {
             return None;
         }
 
+        if let Some(pred) = &ctx.external_prediction {
+            if pred.fused_confidence > 0.75 {
+                // boost confidence
+            }
+        }
+
+        let pred = ctx.external_prediction.as_ref()?;
         let reason = format!(
             /*
             "hype_reversion \
@@ -99,7 +106,7 @@ impl PredictionStrategy for HypeReversionStrategy {
             */
             "dist={:.4} er={:.3} \
              er1s={:.3} er5s={:.3} er10s={:.3} er30s={:.3} erFull={:.3} \
-             persist={:.2} accel={:.5} vol30={:.4} \
+             \r\npersist={:.2} accel={:.5} vol30={:.4} \
              z30={:.2} z60={:.2} z5m={:.2} \
              \r\nrangePos={:.2} \
              rPos30s={:.2} \
@@ -107,7 +114,11 @@ impl PredictionStrategy for HypeReversionStrategy {
              rPos5m={:.2} \
              rPos10m={:.2} \
              rPos30m={:.2} \
-             rPos60m={:.2}",
+             rPos60m={:.2} \
+             \r\nexternal_btc \
+             fused={:?} ({:.2}) \
+             short={:?} ({:.2}) \
+             broad={:?} ({:.2})",
             trend.distance_from_origin_pct,
             trend.efficiency_ratio,
             trend.er_1s,
@@ -128,6 +139,12 @@ impl PredictionStrategy for HypeReversionStrategy {
             trend.range_position_10m,
             trend.range_position_30m,
             trend.range_position_60m,
+            pred.fused_direction,
+            pred.fused_confidence,
+            pred.short.direction,
+            pred.short.confidence,
+            pred.broad.direction,
+            pred.broad.confidence,
         );
 
         Some(PredictionSignal {

@@ -1,3 +1,5 @@
+use btc_prediction_engine::prelude::*;
+
 use crate::prediction::features::{
     BtcFeatures,
     PolymarketFeatures,
@@ -12,4 +14,6 @@ pub struct PredictionContext {
     pub polymarket: PolymarketFeatures,
 
     pub seconds_remaining: u64,
+
+    pub external_prediction: Option<PredictionSnapshot>,
 }
