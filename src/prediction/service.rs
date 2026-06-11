@@ -58,7 +58,7 @@ impl PredictionService {
         let window_state = Arc::new(RwLock::new(WindowState::default()));
 
         let btc_feed = Arc::new(BtcFeed::new(
-            50051,
+            "BTC/USD",
             btc_snapshot,
             Arc::clone(&window_state),
         ));

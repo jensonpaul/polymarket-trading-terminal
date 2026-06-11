@@ -1,50 +1,38 @@
-//! BTC price feed — gRPC consumer + 4-layer cleaning pipeline.
-//!
-//! Replaces the original `btc_feed.rs`.  The core change is that raw
-//! exchange ticks now pass through the [`Pipeline`] before being stored
-//! in the rolling window or used to update [`WindowState`].
+//! BTC price feed — orderly library consumer + 4-layer cleaning pipeline.
 //!
 //! ## Architecture
 //!
 //! ```text
-//!   gRPC stream (aggregated order book)
+//!   orderly::OrderlyEngine (watch::Receiver<OutTick>)
 //!         │
-//!   build_exchange_tick()   ← converts proto → ExchangeTick per exchange
+//!   out_tick_to_exchange_ticks()   ← converts OutTick → ExchangeTick per exchange
 //!         │
-//!   Pipeline::ingest()      ← 4-layer noise filter
+//!   Pipeline::ingest()             ← 4-layer noise filter
 //!         │  (fires once per 250 ms bucket)
 //!   BtcSample (clean price) → RollingWindow + WindowState
 //! ```
 //!
-//! The gRPC `Summary` message carries bids/asks with an `exchange` field
-//! on each `Level`, so levels are split per exchange here and one
-//! [`ExchangeTick`] is constructed per exchange group.
+//! `orderly::OutTick` carries bids/asks with an `exchange` field on each
+//! `Level`, so levels are split per exchange here and one [`ExchangeTick`]
+//! is constructed per exchange group — exactly as before, without gRPC.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use std::collections::HashMap;
-use std::sync::Mutex;
 
 use arc_swap::ArcSwap;
+use orderly::{Exchange as OrdExchange, Level as OrdLevel, OrderlyEngine, OutTick};
 use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
 use rust_decimal::Decimal;
 use tokio::sync::RwLock;
 use tokio::time;
-use tonic::transport::Channel;
 use tracing::{error, info, warn};
 
-use crate::state::{slug_for_ts, stamp_5m};
+use crate::prediction::btc_aggregator::{Exchange, ExchangeTick, Level, Pipeline, PipelineConfig};
 use crate::prediction::{BtcFeatures, BtcSample, RollingWindow, WindowState};
-use crate::prediction::btc_aggregator::{
-    Exchange, ExchangeTick, Level,
-    CleanPrice, Pipeline, PipelineConfig,
-};
+use crate::state::{slug_for_ts, stamp_5m};
 
-pub mod proto {
-    tonic::include_proto!("orderbook");
-}
-
-use proto::orderbook_aggregator_client::OrderbookAggregatorClient;
+// ── BtcSnapshot ───────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Default)]
 pub struct BtcSnapshot {
@@ -52,7 +40,7 @@ pub struct BtcSnapshot {
     pub price: Decimal,
 
     /// Most recent clean price from the pipeline (for display/debugging).
-    pub clean: Option<CleanPrice>,
+    pub clean: Option<crate::prediction::btc_aggregator::CleanPrice>,
 }
 
 pub type SharedBtcSnapshot = Arc<ArcSwap<BtcSnapshot>>;
@@ -60,7 +48,7 @@ pub type SharedBtcSnapshot = Arc<ArcSwap<BtcSnapshot>>;
 // ── BtcFeed ───────────────────────────────────────────────────────────────────
 
 pub struct BtcFeed {
-    port:         u16,
+    symbol:       String,
     window:       Arc<RwLock<RollingWindow<BtcSample>>>,
     snapshot:     SharedBtcSnapshot,
     window_state: Arc<RwLock<WindowState>>,
@@ -68,12 +56,12 @@ pub struct BtcFeed {
 
 impl BtcFeed {
     pub fn new(
-        port: u16,
+        symbol: impl Into<String>,
         snapshot: SharedBtcSnapshot,
         window_state: Arc<RwLock<WindowState>>,
     ) -> Self {
         Self {
-            port,
+            symbol: symbol.into(),
             snapshot,
             window_state,
             window: Arc::new(RwLock::new(RollingWindow::new(
@@ -96,58 +84,64 @@ impl BtcFeed {
 
     pub async fn run(&self) {
         loop {
-            match self.run_connection().await {
-                Ok(_) => {}
+            match self.run_engine().await {
+                Ok(_)  => {}
                 Err(e) => error!("btc feed error: {e}"),
             }
             time::sleep(Duration::from_secs(5)).await;
         }
     }
 
-    async fn connect(&self) -> anyhow::Result<OrderbookAggregatorClient<Channel>> {
-        let addr = format!("http://0.0.0.0:{}", self.port);
-        Ok(OrderbookAggregatorClient::connect(addr).await?)
-    }
+    /// Start the orderly engine for our symbol and consume ticks until the
+    /// watch channel closes or the engine errors.  A fresh pipeline is
+    /// created on every call so state resets cleanly on restart.
+    async fn run_engine(&self) -> anyhow::Result<()> {
+        let engine = OrderlyEngine::new(self.symbol.clone());
+        let (handle, mut rx) = engine.start().await?;
+        info!("btc orderly engine started for {}", self.symbol);
 
-    async fn run_connection(&self) -> anyhow::Result<()> {
-        let mut client = self.connect().await?;
-        info!("btc grpc connected");
-
-        let request = tonic::Request::new(proto::Empty {});
-        let mut stream = client.book_summary(request).await?.into_inner();
-
-        // One pipeline instance per connection — resets cleanly on reconnect.
         let mut pipeline = Pipeline::new(PipelineConfig::default());
 
-        while let Some(summary) = stream.message().await? {
-            if summary.bids.is_empty() || summary.asks.is_empty() {
+        loop {
+            // Wait for the next merged book tick.
+            if rx.changed().await.is_err() {
+                // All senders dropped — engine has shut down.
+                break;
+            }
+
+            let tick: OutTick = rx.borrow().clone();
+
+            if tick.bids.is_empty() || tick.asks.is_empty() {
                 continue;
             }
 
             let received_ms = chrono::Utc::now().timestamp_millis() as u64;
+            let exchange_ticks = out_tick_to_exchange_ticks(&tick, received_ms);
 
-            // Split the Summary's levels by exchange field and build one
-            // ExchangeTick per exchange for the pipeline.
-            let ticks = build_exchange_ticks(&summary, received_ms);
-
-            for tick in &ticks {
-                if let Some(clean) = pipeline.ingest(tick) {
+            for ex_tick in &exchange_ticks {
+                if let Some(clean) = pipeline.ingest(ex_tick) {
                     self.publish_clean(clean, received_ms).await;
                 }
             }
         }
 
-        // Flush the partial bucket before disconnecting.
+        // Flush the partial bucket before restarting.
         if let Some(clean) = pipeline.flush() {
-            self.publish_clean(clean, chrono::Utc::now().timestamp_millis() as u64).await;
+            self.publish_clean(clean, chrono::Utc::now().timestamp_millis() as u64)
+                .await;
         }
 
-        warn!("btc stream disconnected");
+        handle.shutdown().await;
+        warn!("btc orderly engine disconnected");
         Ok(())
     }
 
     /// Store a clean price into the rolling window and update downstream state.
-    async fn publish_clean(&self, clean: CleanPrice, received_ms: u64) {
+    async fn publish_clean(
+        &self,
+        clean: crate::prediction::btc_aggregator::CleanPrice,
+        received_ms: u64,
+    ) {
         let decimal_price = match Decimal::from_f64(clean.smoothed) {
             Some(d) => d,
             None => return,
@@ -190,7 +184,6 @@ impl BtcFeed {
         let mut low  = current_price;
         let now_ms   = latest.timestamp_ms;
 
-        // ── Dense bins (for volatility, z-score, high/low) ────────────────
         let mut prices_1s:  Vec<f64> = Vec::new();
         let mut prices_5s:  Vec<f64> = Vec::new();
         let mut prices_10s: Vec<f64> = Vec::new();
@@ -234,23 +227,12 @@ impl BtcFeed {
             0.5
         };
 
-        let range_position_30s =
-            range_position_over(current_f, &prices_30s);
-
-        let range_position_60s =
-            range_position_over(current_f, &prices_60s);
-
-        let range_position_5m =
-            range_position_over(current_f, &prices_5m);
-
-        let range_position_10m =
-            range_position_over(current_f, &prices_10m);
-
-        let range_position_30m =
-            range_position_over(current_f, &prices_30m);
-
-        let range_position_60m =
-            range_position_over(current_f, &prices_60m);
+        let range_position_30s  = range_position_over(current_f, &prices_30s);
+        let range_position_60s  = range_position_over(current_f, &prices_60s);
+        let range_position_5m   = range_position_over(current_f, &prices_5m);
+        let range_position_10m  = range_position_over(current_f, &prices_10m);
+        let range_position_30m  = range_position_over(current_f, &prices_30m);
+        let range_position_60m  = range_position_over(current_f, &prices_60m);
 
         let net_displacement = ws.btc_distance_from_origin_pct.abs();
         let efficiency_ratio = if ws.btc_path_length > 0.0 {
@@ -259,23 +241,6 @@ impl BtcFeed {
             0.0
         };
 
-        // ── Strided ER: one sample per stride_ms, newest-first ────────────
-        //
-        // For each ER variant we walk the rolling window (oldest → newest)
-        // and snap one price per stride bucket.  This means:
-        //   er_1s  → samples every  1 000 ms  → up to  5 points over  5 min
-        //   er_5s  → samples every  5 000 ms  → up to  5 points over  5 min  (wait — see below)
-        //
-        // We look back a fixed horizon equal to stride_ms * max_points so
-        // that each variant uses the same number of strides regardless of
-        // how far back data goes.
-        //
-        // Sampling logic (newest-first bucketing):
-        //   bucket_index = (now_ms - sample.timestamp_ms) / stride_ms
-        //   Keep the first (= newest) sample that falls in each bucket.
-        //
-        // The result is then reversed so prices run oldest → newest before
-        // being handed to efficiency_ratio_over (net = last − first).
         let er_1s   = strided_er(window.iter(), now_ms,  1_000,  60);
         let er_5s   = strided_er(window.iter(), now_ms,  5_000,  60);
         let er_10s  = strided_er(window.iter(), now_ms, 10_000,  30);
@@ -329,36 +294,31 @@ impl BtcFeed {
     }
 }
 
-// ── Proto → ExchangeTick conversion ──────────────────────────────────────────
+// ── OutTick → ExchangeTick conversion ─────────────────────────────────────────
 
-/// Build one [`ExchangeTick`] per exchange from a [`proto::Summary`].
+/// Split an [`OutTick`] into one [`ExchangeTick`] per exchange.
 ///
-/// Each [`proto::Level`] carries an `exchange` string field populated by
-/// your gRPC aggregator server.  Levels are bucketed by exchange and one
-/// [`ExchangeTick`] is emitted per group so the pipeline can apply
-/// independent per-exchange spike filtering.
-///
-/// Levels whose `exchange` string is empty or unrecognised are attributed
-/// to [`Exchange::Binance`] (highest-liquidity fallback) — this is logged
-/// at WARN level in `parse_exchange` so you can catch unexpected values.
-fn build_exchange_ticks(
-    summary: &proto::Summary,
-    received_ms: u64,
-) -> Vec<ExchangeTick> {
-    // Bucket bids and asks by exchange.
+/// Each `orderly::Level` carries an `exchange` field.  Levels are bucketed
+/// by exchange and one [`ExchangeTick`] is emitted per group so the pipeline
+/// can apply independent per-exchange spike filtering — exactly as the
+/// previous gRPC path did.
+fn out_tick_to_exchange_ticks(tick: &OutTick, received_ms: u64) -> Vec<ExchangeTick> {
     let mut bid_map: HashMap<Exchange, Vec<Level>> = HashMap::new();
     let mut ask_map: HashMap<Exchange, Vec<Level>> = HashMap::new();
 
-    for bid in &summary.bids {
-        let ex = parse_exchange(&bid.exchange);
-        bid_map.entry(ex).or_default().push(proto_level_to_level(bid));
+    for level in &tick.bids {
+        bid_map
+            .entry(map_exchange(&level.exchange))
+            .or_default()
+            .push(map_level(level));
     }
-    for ask in &summary.asks {
-        let ex = parse_exchange(&ask.exchange);
-        ask_map.entry(ex).or_default().push(proto_level_to_level(ask));
+    for level in &tick.asks {
+        ask_map
+            .entry(map_exchange(&level.exchange))
+            .or_default()
+            .push(map_level(level));
     }
 
-    // Merge the two maps into one tick per exchange.
     let all_exchanges: std::collections::HashSet<Exchange> = bid_map
         .keys()
         .chain(ask_map.keys())
@@ -370,44 +330,37 @@ fn build_exchange_ticks(
         .filter_map(|ex| {
             let bids = bid_map.remove(&ex).unwrap_or_default();
             let asks = ask_map.remove(&ex).unwrap_or_default();
-
             if bids.is_empty() && asks.is_empty() {
                 return None;
             }
-
             Some(ExchangeTick { exchange: ex, received_ms, bids, asks })
         })
         .collect()
 }
 
-fn parse_exchange(s: &str) -> Exchange {
-    match s.to_lowercase().as_str() {
-        "binance"  => Exchange::Binance,
-        "coinbase" => Exchange::Coinbase,
-        "kraken"   => Exchange::Kraken,
-        "bitstamp" => Exchange::Bitstamp,
-        "" => Exchange::Binance, // field absent — silent fallback
-        other => {
-            warn!(exchange = other, "unrecognised exchange string — attributed to Binance");
-            Exchange::Binance
-        }
+/// Map `orderly::Exchange` → local pipeline `Exchange`.
+#[inline]
+fn map_exchange(ex: &OrdExchange) -> Exchange {
+    match ex {
+        OrdExchange::Binance  => Exchange::Binance,
+        OrdExchange::Coinbase => Exchange::Coinbase,
+        OrdExchange::Kraken   => Exchange::Kraken,
+        OrdExchange::Bitstamp => Exchange::Bitstamp,
     }
 }
 
-fn proto_level_to_level(lvl: &proto::Level) -> Level {
-    use rust_decimal::prelude::FromPrimitive;
-    Level {
-        price:  Decimal::from_f64(lvl.price).unwrap_or_default(),
-        amount: Decimal::from_f64(lvl.amount).unwrap_or_default(),
-    }
+/// Map `orderly::Level` → local pipeline `Level` (price + amount only).
+#[inline]
+fn map_level(l: &OrdLevel) -> Level {
+    Level { price: l.price, amount: l.amount }
 }
 
-// ── Statistics helpers (unchanged from original) ──────────────────────────────
+// ── Statistics helpers (unchanged) ────────────────────────────────────────────
 
 fn volatility(prices: &[f64]) -> f64 {
     if prices.len() < 2 { return 0.0; }
     let mean = prices.iter().sum::<f64>() / prices.len() as f64;
-    let var   = prices.iter().map(|v| { let d = v - mean; d * d }).sum::<f64>()
+    let var  = prices.iter().map(|v| { let d = v - mean; d * d }).sum::<f64>()
         / prices.len() as f64;
     var.sqrt() / mean.max(1.0)
 }
@@ -422,31 +375,6 @@ fn z_score_of(value: f64, samples: &[f64]) -> f64 {
     (value - mean) / std
 }
 
-/// Compute the Efficiency Ratio using **strided** price sampling.
-///
-/// Instead of taking every available 250 ms candle (which inflates path
-/// length with micro-noise), we snap **one price per `stride_ms` bucket**
-/// and feed only those sparse samples into the ER formula.
-///
-/// # Parameters
-/// - `iter`      – the rolling window iterator (oldest → newest `BtcSample`s)
-/// - `now_ms`    – timestamp of the most recent sample
-/// - `stride_ms` – bucket width in milliseconds (e.g. 1 000 for er_1s)
-/// - `max_buckets` – how many buckets to look back; total look-back =
-///                  `stride_ms * max_buckets`
-///
-/// # Bucket assignment (newest-first)
-/// For each sample we compute:
-/// ```text
-/// bucket = (now_ms - sample.timestamp_ms) / stride_ms
-/// ```
-/// We keep the **newest** sample per bucket (i.e. the one with the
-/// smallest `age_ms` within that bucket).  Because `iter` goes oldest →
-/// newest, we just overwrite on each visit — the last write per bucket is
-/// the newest sample in it.
-///
-/// After collecting, the bucket map is sorted by bucket index (ascending =
-/// oldest first) and handed to `efficiency_ratio_over`.
 fn strided_er<'a>(
     iter:        impl Iterator<Item = &'a BtcSample>,
     now_ms:      u64,
@@ -454,32 +382,20 @@ fn strided_er<'a>(
     max_buckets: u64,
 ) -> f64 {
     let horizon_ms = stride_ms * max_buckets;
- 
-    // bucket_index → price (newest sample in that bucket wins)
     let mut buckets: std::collections::BTreeMap<u64, f64> = std::collections::BTreeMap::new();
- 
+
     for sample in iter {
         let age_ms = now_ms.saturating_sub(sample.timestamp_ms);
-        if age_ms > horizon_ms {
-            continue;
-        }
-        let bucket = age_ms / stride_ms;
+        if age_ms > horizon_ms { continue; }
+        let bucket  = age_ms / stride_ms;
         let price_f = match sample.price.to_f64() {
             Some(v) => v,
             None => continue,
         };
-        // Overwrite: since iter goes oldest → newest the last write is the
-        // newest sample in each bucket, which is what we want.
         buckets.insert(bucket, price_f);
     }
- 
-    if buckets.len() < 2 {
-        return 0.0;
-    }
- 
-    // BTreeMap is sorted ascending by key (= ascending age = oldest first
-    // when we reverse).  We want prices in chronological order (oldest →
-    // newest), which is descending bucket index.
+
+    if buckets.len() < 2 { return 0.0; }
     let prices: Vec<f64> = buckets.into_values().rev().collect();
     efficiency_ratio_over(&prices)
 }
@@ -491,25 +407,13 @@ fn efficiency_ratio_over(prices: &[f64]) -> f64 {
     if path > 0.0 { (net / path).min(1.0) } else { 0.0 }
 }
 
-fn range_position_over(
-    current: f64,
-    prices: &[f64],
-) -> f64 {
-    if prices.is_empty() {
-        return 0.5;
-    }
-
+fn range_position_over(current: f64, prices: &[f64]) -> f64 {
+    if prices.is_empty() { return 0.5; }
     let mut high = f64::MIN;
     let mut low  = f64::MAX;
-
     for p in prices {
         high = high.max(*p);
         low  = low.min(*p);
     }
-
-    if high > low {
-        (current - low) / (high - low)
-    } else {
-        0.5
-    }
+    if high > low { (current - low) / (high - low) } else { 0.5 }
 }
