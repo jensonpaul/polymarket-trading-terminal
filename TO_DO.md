@@ -2,3 +2,4 @@
 
 First order is still auto canceled even after initial INIT_PING order status check (issue is something else) - client initiation/heartbeats?
 
+Replace auth gateway to accept private key and construct the Clob Client and init Clob Client in `UICommand::InitializeClient`
