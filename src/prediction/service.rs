@@ -12,6 +12,7 @@ use polymarket_client_sdk_v2::{
 };
 use tokio::sync::RwLock;
 use tracing::{error, info};
+use anyhow::Context;
 
 use crate::{
     prediction::{
@@ -21,14 +22,27 @@ use crate::{
         PredictionContext,
         PredictionEngine,
         PredictionStore,
-        strategies::{HypeReversionStrategy, ConvictionFollowStrategy},
+        strategies::{
+            HypeReversionStrategy, 
+            ConvictionFollowStrategy,
+            ExternalBtcStrategy,
+        },
         WindowState,
     },
     state::{slug_for_ts, stamp_5m},
     worker::{get_or_fetch_token_ids, get_or_fetch_market},
 };
 
-use btc_prediction_engine::prelude::*;
+use tokio::signal;
+use btc_onnx_trend_model::OnnxTrendModel;
+use btc_prediction_engine::{
+    engine::{EngineConfig, PredictionEngine as ExternalBtcPredictionEngine},
+    feeds::{BookFeedConfig, FeedConfig},
+    pipeline::PipelineConfig,
+    types::{Exchange, PredictionSnapshot, Symbol, TrendDirection},
+};
+
+const MODEL_BYTES: &[u8] = include_bytes!("../../models/direction_model.onnx");
 
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_SIGNAL_AGE_MS: u64 = 30_000;
@@ -86,9 +100,28 @@ impl PredictionService {
         // External BTC snappshot prediction
         // --------------------------------------------------------------
 
+        let onnx_model = tokio::task::spawn_blocking(move || {
+            OnnxTrendModel::load_from_bytes(MODEL_BYTES)
+        })
+        .await
+        .context("model load task panicked")?
+        .context("failed to load ONNX model")?;
+
+        /*
+        let onnx_model = OnnxTrendModel::load_from_bytes(MODEL_BYTES)
+            .expect("embedded direction_model.onnx failed to load — rebuild after retraining");
+
+        let engine_config = EngineConfig {
+            pipeline: PipelineConfig {
+                ext_trend: Some(Box::new(onnx_model)),
+                ..PipelineConfig::default()
+            },
+            ..EngineConfig::default()
+        };
+
         let (btc_engine, _handles) =
-            btc_prediction_engine::prelude::PredictionEngine::start(
-                EngineConfig::default(),
+            btc_prediction_engine::prelude::ExternalBtcPredictionEngine::start(
+                engine_config,
             )
             .await;
 
@@ -113,7 +146,60 @@ impl PredictionService {
             ),
         );
 
+        btc_engine.add_book_feed(BookFeedConfig::public(Exchange::Binance,  Symbol::BtcUsd));
+        btc_engine.add_book_feed(BookFeedConfig::public(Exchange::Kraken,   Symbol::BtcUsd));
+        btc_engine.add_book_feed(BookFeedConfig::public(Exchange::Bitstamp, Symbol::BtcUsd));
+
         let mut rx = btc_engine.subscribe();
+        */
+
+        // ── Engine configuration ──────────────────────────────────────────────────
+        let pipeline_config = PipelineConfig {
+            // Hand the trained model to the pipeline. It will be invoked on every
+            // feature vector produced by Stage 2.
+            ext_trend: Some(Box::new(onnx_model)),
+    
+            // Forecast horizons: 5 s × 6 steps (30 s total) and 30 s × 10 steps
+            // (5 min total). These are unchanged from the default.
+            forecast_steps: vec![(5, 6), (30, 10)],
+    
+            // All other fields (filter, fusion, broadcast_cap) use sensible
+            // defaults — adjust here if needed.
+            ..PipelineConfig::default()
+        };
+    
+        let engine_config = EngineConfig {
+            pipeline: pipeline_config,
+            ..EngineConfig::default()
+        };
+    
+        // ── Start engine ──────────────────────────────────────────────────────────
+        info!("starting prediction engine");
+        let (engine, handles) = ExternalBtcPredictionEngine::start(engine_config).await;
+    
+        // ── Attach trade feeds ────────────────────────────────────────────────────
+        // Each feed runs as an independent tokio task with its own reconnect loop.
+        for exchange in [Exchange::Binance, Exchange::Coinbase, Exchange::Kraken, Exchange::Bitstamp] {
+            let config = FeedConfig::public(exchange, Symbol::BtcUsd);
+            engine.add_feed(config);
+            info!(?exchange, "trade feed spawned");
+        }
+    
+        // ── Attach order-book feeds ───────────────────────────────────────────────
+        // Book feeds supply the top-5 bid/ask imbalance features (book_imb5,
+        // book_spread_pct, book_pressure) — the highest-signal sub-minute
+        // inputs for the model.
+        //
+        // Coinbase does not expose a public order-book WebSocket on the same
+        // endpoint, so only three exchanges are used here.
+        for exchange in [Exchange::Binance, Exchange::Kraken, Exchange::Bitstamp] {
+            let config = BookFeedConfig::public(exchange, Symbol::BtcUsd);
+            engine.add_book_feed(config);
+            info!(?exchange, "order-book feed spawned");
+        }
+    
+        // ── Subscribe to prediction snapshots ────────────────────────────────────
+        let mut rx = engine.subscribe();
 
         {
             let snapshot =
@@ -136,13 +222,9 @@ impl PredictionService {
             HypeReversionStrategy::new()
         );
 
-        /*
         self.engine.register(
-            ExternalBtcStrategy::new(
-                Arc::clone(&self.btc_prediction_snapshot),
-            )
+            ExternalBtcStrategy::new()
         );
-        */
 
         let btc_feed = Arc::clone(&self.btc_feed);
         tokio::spawn(async move {

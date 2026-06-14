@@ -21,6 +21,9 @@ target
 #.idea/
 
 .env
+
 bkp/
 ChatGPT-Rewrite/
 Claude-Rewrite/
+
+models/*.onnx

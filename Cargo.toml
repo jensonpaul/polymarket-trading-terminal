@@ -36,7 +36,7 @@ strip = false
 [dependencies]
 btc_prediction_engine = { 
     git = "https://github.com/jensonpaul/btc-prediction-engine.git", 
-    branch = "0.1.0"
+    branch = "0.2.0"
 }
 polymarket_client_sdk_v2 = { 
 	git = "https://github.com/jensonpaul/rs-clob-client-v2.git", 
@@ -52,6 +52,10 @@ polymarket_client_sdk_v2 = {
 orderly = { 
     git = "https://github.com/jensonpaul/orderly.git", 
     branch = "0.2.0"
+}
+btc-onnx-trend-model = { 
+    git = "https://github.com/jensonpaul/btc-onnx-trend-model.git", 
+    branch = "0.1.0"
 }
 anyhow        = "1.0.102"
 arc-swap      = "1.9.1"

@@ -116,6 +116,7 @@ impl PredictionStrategy for HypeReversionStrategy {
              rPos30m={:.2} \
              rPos60m={:.2} \
              \r\nexternal_btc \
+             mlFused={:?} ({:.2}) \
              fused={:?} ({:.2}) \
              short={:?} ({:.2}) \
              broad={:?} ({:.2})",
@@ -141,6 +142,8 @@ impl PredictionStrategy for HypeReversionStrategy {
             trend.range_position_60m,
             pred.fused_direction,
             pred.fused_confidence,
+            pred.heuristic.fused_direction,
+            pred.heuristic.fused_confidence,
             pred.short.direction,
             pred.short.confidence,
             pred.broad.direction,
