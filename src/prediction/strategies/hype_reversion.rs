@@ -88,31 +88,18 @@ impl PredictionStrategy for HypeReversionStrategy {
             );
         }
 
-        let Some(pred) = ctx.external_prediction.as_ref() else {
-            return PredictionSignal::no_trade(
-                name,
-                "waiting: external prediction not available",
-                ctx.timestamp_ms,
-            );
-        };
-
         let reason = format!(
             "dist={:.4} er={:.3} \
-             er1s={:.3} er5s={:.3} er10s={:.3} er30s={:.3} erFull={:.3} \
-             \r\npersist={:.2} accel={:.5} vol30={:.4} \
-             z30={:.2} z60={:.2} z5m={:.2} \
-             \r\nrangePos={:.2} \
-             rPos30s={:.2} \
-             rPos60s={:.2} \
-             rPos5m={:.2} \
-             rPos10m={:.2} \
-             rPos30m={:.2} \
-             rPos60m={:.2} \
-             \r\nexternal_btc \
-             mlFused={:?} ({:.2}) \
-             fused={:?} ({:.2}) \
-             short={:?} ({:.2}) \
-             broad={:?} ({:.2})",
+            er1s={:.3} er5s={:.3} er10s={:.3} er30s={:.3} erFull={:.3} \
+            \r\npersist={:.2} accel={:.5} vol30={:.4} \
+            \r\nz30={:.2} z60={:.2} z5m={:.2} \
+            \r\nrPos={:.2} \
+            rPs30s={:.2} \
+            rPs60s={:.2} \
+            rPs5m={:.2} \
+            rPs10m={:.2} \
+            rPs30m={:.2} \
+            rPs60m={:.2}",
             trend.distance_from_origin_pct,
             trend.efficiency_ratio,
             trend.er_1s,
@@ -133,14 +120,6 @@ impl PredictionStrategy for HypeReversionStrategy {
             trend.range_position_10m,
             trend.range_position_30m,
             trend.range_position_60m,
-            pred.fused_direction,
-            pred.fused_confidence,
-            pred.heuristic.fused_direction,
-            pred.heuristic.fused_confidence,
-            pred.short.direction,
-            pred.short.confidence,
-            pred.broad.direction,
-            pred.broad.confidence,
         );
 
         let positions = [

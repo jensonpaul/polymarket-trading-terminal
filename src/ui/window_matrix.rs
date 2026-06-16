@@ -85,21 +85,71 @@ impl PolymarketDashboardApp {
                     );
                 });
 
-                // ----------------------------------------------------------------
-                // Market price ticker
-                // ----------------------------------------------------------------
-                if let Some(prices_arc) = self
-                    .state
-                    .market_prices
-                    .get(&window.timestamp_5m)
-                    .map(|e| e.value().clone())
-                {
-                    let snap = prices_arc.load();
-                    let up_c = snap.up_price * 100.0;
-                    let down_c = snap.down_price * 100.0;
+                ui.add_space(8.0);
 
-                    ui.add_space(8.0);
-                    ui.horizontal_wrapped(|ui| {
+                ui.horizontal(|ui| {
+                    // ----------------------------------------------------------------
+                    // BTC metrics ticker
+                    // ----------------------------------------------------------------
+                    if let Some(pred) = self.prediction_state.signals.get(&window.timestamp_5m) {
+                        if let Some(btc) = pred.btc.as_ref() {
+                            if !btc.origin_price.is_zero() {
+                                let origin_f = btc.origin_price.to_string();
+                                let current_f = btc.current_price.to_string();
+                                let dist = btc.distance_from_origin_pct;
+                                let (arrow, dist_color) = if dist >= 0.0 {
+                                    ("▲", Theme::BUY_GREEN)
+                                } else {
+                                    ("▼", Theme::SELL_RED)
+                                };
+                                let distance_from_origin = (btc.current_price - btc.origin_price).abs();
+
+                                panel_frame().show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            egui::RichText::new(format!("${:.2}", btc.origin_price))
+                                                .monospace()
+                                                .color(Theme::TEXT_PRIMARY),
+                                        );
+                                        ui.separator();
+                                        ui.label(
+                                            egui::RichText::new(format!("${:.2}", btc.current_price))
+                                                .monospace()
+                                                .color(Theme::WARNING),
+                                        );
+                                        ui.separator();
+                                        ui.label(
+                                            egui::RichText::new(format!("${:.2}", distance_from_origin))
+                                                .monospace()
+                                                .strong()
+                                                .color(dist_color),
+                                        );
+                                        ui.separator();
+                                        ui.label(
+                                            egui::RichText::new(format!("{arrow} {:.4}%", dist * 100.0))
+                                                .monospace()
+                                                .strong()
+                                                .color(dist_color),
+                                        );
+                                    });
+                                });
+                            }
+                        }
+                    }
+
+                    // ----------------------------------------------------------------
+                    // Market price ticker
+                    // ----------------------------------------------------------------
+                    if let Some(prices_arc) = self
+                        .state
+                        .market_prices
+                        .get(&window.timestamp_5m)
+                        .map(|e| e.value().clone())
+                    {
+                        let snap = prices_arc.load();
+                        let up_c = snap.up_price * 100.0;
+                        let down_c = snap.down_price * 100.0;
+
                         panel_frame()
                             .fill(Theme::BUY_GREEN_BG)
                             .stroke(egui::Stroke::new(1.0, Theme::BUY_GREEN))
@@ -130,58 +180,8 @@ impl PolymarketDashboardApp {
                         if !snap.connected {
                             ui.colored_label(Theme::SELL_RED, "DISCONNECTED");
                         }
-                    });
-                }
-
-                // ----------------------------------------------------------------
-                // BTC metrics ticker
-                // ----------------------------------------------------------------
-                if let Some(pred) = self.prediction_state.signals.get(&window.timestamp_5m) {
-                    if let Some(btc) = pred.btc.as_ref() {
-                        if !btc.origin_price.is_zero() {
-                            let origin_f = btc.origin_price.to_string();
-                            let current_f = btc.current_price.to_string();
-                            let dist = btc.distance_from_origin_pct;
-                            let (arrow, dist_color) = if dist >= 0.0 {
-                                ("▲", Theme::BUY_GREEN)
-                            } else {
-                                ("▼", Theme::SELL_RED)
-                            };
-                            let distance_from_origin = (btc.current_price - btc.origin_price).abs();
-
-                            ui.add_space(6.0);
-                            panel_frame().show(ui, |ui| {
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.label(
-                                        egui::RichText::new(format!("${:.2}", btc.origin_price))
-                                            .monospace()
-                                            .color(Theme::TEXT_PRIMARY),
-                                    );
-                                    ui.separator();
-                                    ui.label(
-                                        egui::RichText::new(format!("${:.2}", btc.current_price))
-                                            .monospace()
-                                            .color(Theme::WARNING),
-                                    );
-                                    ui.separator();
-                                    ui.label(
-                                        egui::RichText::new(format!("${:.2}", distance_from_origin))
-                                            .monospace()
-                                            .strong()
-                                            .color(dist_color),
-                                    );
-                                    ui.separator();
-                                    ui.label(
-                                        egui::RichText::new(format!("{arrow} {:.4}%", dist * 100.0))
-                                            .monospace()
-                                            .strong()
-                                            .color(dist_color),
-                                    );
-                                });
-                            });
-                        }
                     }
-                }
+                });
 
                 // ----------------------------------------------------------------
                 // Strategy signals
@@ -240,9 +240,10 @@ impl PolymarketDashboardApp {
                                                 .color(Theme::TEXT_PRIMARY),
                                             );
 
-                                            ui.separator();
+                                            //ui.separator();
                                         }
 
+                                        /*
                                         // Entry price
                                         if !signal.target_entry.is_zero() {
                                             ui.label(
@@ -254,6 +255,7 @@ impl PolymarketDashboardApp {
                                                 .color(Theme::TEXT_PRIMARY),
                                             );
                                         }
+                                        */
                                     });
 
                                     /*
@@ -265,12 +267,14 @@ impl PolymarketDashboardApp {
                                             .color(Theme::TEXT_MUTED),
                                     );
                                     */
-                                    ui.label(
-                                        egui::RichText::new(&signal.reason)
-                                            .monospace()
-                                            .strong()
-                                            .color(Theme::TEXT_PRIMARY),
-                                    );
+                                    ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                                        ui.label(
+                                            egui::RichText::new(&signal.reason)
+                                                .monospace()
+                                                .strong()
+                                                .color(Theme::TEXT_PRIMARY),
+                                        );
+                                    });
                                 });
                             }
                         });

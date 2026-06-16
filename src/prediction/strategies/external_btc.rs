@@ -86,10 +86,12 @@ impl PredictionStrategy for ExternalBtcStrategy {
         let reason = if let Some(pred) = ctx.external_prediction.as_ref() {
             format!(
                 "[{source}] direction={direction:?} conf={confidence:.3} | \
-                 model_fused={:?} ({:.3}) heuristic={:?} ({:.3}) | \
+                 model_fused={:?} ({:.3}) short={:?} ({:.3}) heuristic={:?} ({:.3}) | \
                  conviction_queue={} building={:?}({}ticks)",
                 pred.fused_direction,
                 pred.fused_confidence,
+                pred.short.direction,
+                pred.short.confidence,
                 pred.heuristic.fused_direction,
                 pred.heuristic.fused_confidence,
                 ctx.conviction.as_ref().map_or(0, |c| c.queued),
