@@ -1,5 +1,6 @@
 pub mod analysis;
 pub mod btc_feed;
+pub mod conviction;
 pub mod context;
 pub mod engine;
 pub mod features;
@@ -11,12 +12,14 @@ pub mod state;
 pub mod statistics;
 pub mod storage;
 pub mod strategy;
+pub mod trend_strength;
 pub mod window_state;
 
 pub mod strategies;
 pub mod btc_aggregator;
 
 pub use analysis::*;
+pub use conviction::*;
 pub use context::*;
 pub use engine::*;
 pub use features::*;
@@ -27,4 +30,5 @@ pub use state::*;
 pub use statistics::*;
 pub use storage::*;
 pub use strategy::*;
+pub use trend_strength::*;
 pub use window_state::*;

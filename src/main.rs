@@ -36,6 +36,15 @@ use prediction::{
     PredictionService,
 };
 
+use btc_onnx_trend_model::{OnnxTrendModel, HotReloadOnnxTrendModel};
+use btc_prediction_engine::{
+    engine::{EngineConfig, PredictionEngine as ExternalBtcPredictionEngine},
+    feeds::{BookFeedConfig, FeedConfig},
+    models::TrendModelExt,
+    pipeline::PipelineConfig,
+    types::{Exchange, Symbol},
+};
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Ignore a missing .env file.
@@ -50,14 +59,11 @@ async fn main() -> anyhow::Result<()> {
         LocalSigner::from_str(&private_key)?.with_chain_id(Some(POLYGON))
     );
 
-    //let creds = get_or_fetch_api_creds(private_key, host.clone()).await?;
-
     let client: Arc<AuthenticatedClient> = Arc::new(
         ClobClient::new(&host, Config::default())?
             .authentication_builder(signer.as_ref())
             .funder(deposit_wallet)
             .signature_type(SignatureType::Poly1271)
-            //.credentials(creds)
             .authenticate()
             .await?
     );
@@ -70,21 +76,16 @@ async fn main() -> anyhow::Result<()> {
     // ------------------------------------------------------------------
     // Prediction state
     // ------------------------------------------------------------------
-    let prediction_state = Arc::new(
-        PredictionStore::new()
-    );
+    let prediction_state = Arc::new(PredictionStore::new());
 
     // ------------------------------------------------------------------
     // Communication channels
-    //
-    // cmd_tx/cmd_rx   : UI → Worker  (user intentions requiring async I/O)
-    // event_bus/event_rx : Worker/tasks → UI  (all AppEvents)
     // ------------------------------------------------------------------
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<messages::UiCommand>(128);
     let (event_bus, event_rx) = event_channel(512);
 
     // ------------------------------------------------------------------
-    // Poll intervals (shared atomically; no message passing needed for reads)
+    // Poll intervals
     // ------------------------------------------------------------------
     let poll_config = Arc::new(PollConfig::new());
 
@@ -106,29 +107,70 @@ async fn main() -> anyhow::Result<()> {
 
     let stdout_layer = tracing_subscriber::fmt::layer().with_level(true);
 
-    // GuiLogger forwards ERROR/WARN events to the toast queue.
-    let gui_layer = GuiLogger { tx: event_bus.clone() };
-
     tracing_subscriber::registry()
         .with(env_filter)
         .with(stdout_layer)
         .with(file_layer)
-        //.with(gui_layer)
         .init();
 
     tracing::info!("Polymarket Trading Terminal starting");
 
     // ------------------------------------------------------------------
-    // Build the worker (ctx will be injected inside eframe callback)
+    // BTC prediction engine — initialised once here, for the lifetime of
+    // the process. The FeatureState accumulators (vol_1800s, ret_300s,
+    // OFI windows, etc.) must never be reset, so the engine must not be
+    // owned by any view or per-window scope.
     // ------------------------------------------------------------------
-    let worker_state = Arc::clone(&app_state);
-    let worker_poll_config = Arc::clone(&poll_config);
+    let model_path = std::env::var("ONNX_MODEL_PATH")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::env::current_exe()
+                .expect("failed to get current exe path")
+                .parent()
+                .expect("exe has no parent dir")
+                .join("../../models/direction_model.onnx")
+        });
 
+    tracing::info!(path = %model_path.display(), "loading ONNX model");
+    let onnx_model = tokio::task::spawn_blocking(move || {
+        HotReloadOnnxTrendModel::load(&model_path)
+    })
+    .await
+    .expect("model load task panicked")
+    .expect("failed to load ONNX model");
+    let _guard = onnx_model.watch()?;  // keep alive — dropping it stops the watcher
+
+    let engine_config = EngineConfig {
+        pipeline: PipelineConfig {
+            ext_trend: Some(Box::new(onnx_model) as Box<dyn TrendModelExt>),
+            forecast_steps: vec![(5, 6), (30, 10)],
+            ..PipelineConfig::default()
+        },
+        ..EngineConfig::default()
+    };
+
+    tracing::info!("starting BTC prediction engine");
+    let (btc_engine, btc_engine_handles) =
+        ExternalBtcPredictionEngine::start(engine_config).await;
+
+    for exchange in [Exchange::Binance, Exchange::Coinbase, Exchange::Kraken, Exchange::Bitstamp] {
+        btc_engine.add_feed(FeedConfig::public(exchange, Symbol::BtcUsd));
+        tracing::info!(?exchange, "trade feed spawned");
+    }
+
+    for exchange in [Exchange::Binance, Exchange::Kraken, Exchange::Bitstamp] {
+        btc_engine.add_book_feed(BookFeedConfig::public(exchange, Symbol::BtcUsd));
+        tracing::info!(?exchange, "order-book feed spawned");
+    }
+
+    // ------------------------------------------------------------------
+    // Worker
+    // ------------------------------------------------------------------
     let mut worker = PolymarketWorker {
         cmd_rx,
         bus: event_bus,
-        state: worker_state,
-        poll_config: worker_poll_config,
+        state: Arc::clone(&app_state),
+        poll_config: Arc::clone(&poll_config),
         client: client.clone(),
         signer: signer.clone(),
     };
@@ -144,7 +186,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // ------------------------------------------------------------------
-    // Start eframe; inject the egui context into the worker, then spawn it
+    // Start eframe
     // ------------------------------------------------------------------
     eframe::run_native(
         "Polymarket Trading Terminal",
@@ -156,19 +198,18 @@ async fn main() -> anyhow::Result<()> {
                 }
             });
 
-            // ------------------------------------------------------------------
-            // Start prediction subsystem
-            // ------------------------------------------------------------------
+            // Spawn prediction service, passing the already-running engine.
+            // btc_engine_handles is moved here to keep the feed tasks alive
+            // for the entire process lifetime.
             let prediction_store = Arc::clone(&prediction_state);
-
             tokio::spawn(async move {
                 let engine = PredictionEngine::new();
-
                 let service = PredictionService::new(
                     prediction_store,
                     engine,
+                    btc_engine,
+                    btc_engine_handles,
                 );
-
                 if let Err(e) = service.run().await {
                     tracing::error!("Prediction service exited: {e:#}");
                 }

@@ -16,14 +16,14 @@
 //! ## What drives the signal
 //!
 //! | Dimension               | Role in this strategy                              |
-//! |-------------------------|----------------------------------------------------|
-//! | `side`                  | Determines which token is suppressed (opposite)    |
-//! | `distance_from_origin`  | Magnitude of the move — bigger → more crowd hype   |
-//! | `efficiency_ratio`      | Cleaner trend → stronger crowd over-reaction       |
-//! | `momentum_persistence`  | Longer-lasting trend → more ingrained crowd bias   |
+//! |-------------------------|---------------------------------------------------|
+//! | `side`                  | Determines which token is suppressed (opposite)   |
+//! | `distance_from_origin`  | Magnitude of the move — bigger → more crowd hype  |
+//! | `efficiency_ratio`      | Cleaner trend → stronger crowd over-reaction      |
+//! | `momentum_persistence`  | Longer-lasting trend → more ingrained crowd bias  |
 //! | `z_score`               | Extreme z-score → BTC unusually far out → snap-back likely |
 //! | `volatility_30s`        | High volatility → suppressed token could rebound fast |
-//! | `acceleration`          | Negative acceleration on an up-trend → trend fading → snap-back soon |
+//! | `acceleration`          | Negative acceleration on an up-trend → trend fading |
 
 use rust_decimal::prelude::ToPrimitive;
 
@@ -61,9 +61,16 @@ impl PredictionStrategy for HypeReversionStrategy {
     fn evaluate(
         &self,
         ctx: &PredictionContext,
-    ) -> Option<PredictionSignal> {
-        // BTC origin must be locked.
-        let trend = MarketAnalyzer::btc_trend(ctx)?;
+    ) -> PredictionSignal {
+        let name = self.name();
+
+        let Some(trend) = MarketAnalyzer::btc_trend(ctx) else {
+            return PredictionSignal::no_trade(
+                name,
+                "waiting: btc origin not locked",
+                ctx.timestamp_ms,
+            );
+        };
 
         let target_side = Self::suppressed_side(trend.side);
 
@@ -74,36 +81,22 @@ impl PredictionStrategy for HypeReversionStrategy {
 
         let entry = target_token.current_price;
         if entry.is_zero() {
-            return None;
+            return PredictionSignal::no_trade(
+                name,
+                "waiting: token price is zero",
+                ctx.timestamp_ms,
+            );
         }
 
-        if let Some(pred) = &ctx.external_prediction {
-            if pred.fused_confidence > 0.75 {
-                // boost confidence
-            }
-        }
+        let Some(pred) = ctx.external_prediction.as_ref() else {
+            return PredictionSignal::no_trade(
+                name,
+                "waiting: external prediction not available",
+                ctx.timestamp_ms,
+            );
+        };
 
-        let pred = ctx.external_prediction.as_ref()?;
         let reason = format!(
-            /*
-            "hype_reversion \
-             btcSide={:?} dist={:.4} er={:.3} \
-             persist={:.2} z30={:.2} z60={:.2} z5m={:.2} accel={:.5} \
-             vol30={:.4} rangePos={:.2} \
-             suppressed={:?} entry={:.4}",
-            trend.side,
-            trend.distance_from_origin_pct,
-            trend.efficiency_ratio,
-            trend.momentum_persistence,
-            trend.z_score_30,
-            trend.z_score_60,
-            trend.z_score_5m,
-            trend.acceleration,
-            trend.volatility_30s,
-            trend.range_position,
-            target_side,
-            entry.to_f64().unwrap_or(0.0),
-            */
             "dist={:.4} er={:.3} \
              er1s={:.3} er5s={:.3} er10s={:.3} er30s={:.3} erFull={:.3} \
              \r\npersist={:.2} accel={:.5} vol30={:.4} \
@@ -150,15 +143,73 @@ impl PredictionStrategy for HypeReversionStrategy {
             pred.broad.confidence,
         );
 
-        Some(PredictionSignal {
+        let positions = [
+            trend.range_position_30s,
+            trend.range_position_60s,
+            trend.range_position_5m,
+            trend.range_position_10m,
+            trend.range_position_30m,
+            trend.range_position_60m,
+        ];
+
+        let weights = [1.0, 2.0, 4.0, 6.0, 10.0, 15.0];
+
+        let range_position_confidence = compute_trend_confidence(&positions, &weights);
+
+        PredictionSignal {
+            strategy_name: name,
             signal_type: SignalType::Buy,
             side: target_side,
-            confidence: 0.0,
+            confidence: range_position_confidence.toward_high,
             target_entry: entry,
             target_exit: entry,
             stop_loss: entry,
             generated_at_ms: ctx.timestamp_ms,
             reason,
-        })
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct TrendConfidence {
+    pub mean_pos: f64,
+    pub agreement: f64,
+    pub toward_high: f64,
+    pub toward_low: f64,
+    pub uncertain: f64,
+}
+
+pub fn compute_trend_confidence(
+    positions: &[f64],
+    weights: &[f64],
+) -> TrendConfidence {
+    assert_eq!(positions.len(), weights.len());
+    assert!(!positions.is_empty());
+
+    let weight_sum: f64 = weights.iter().sum();
+
+    let mean_pos: f64 = positions
+        .iter()
+        .zip(weights.iter())
+        .map(|(p, w)| p * w)
+        .sum::<f64>()
+        / weight_sum;
+
+    let variance: f64 = positions
+        .iter()
+        .zip(weights.iter())
+        .map(|(p, w)| w * (p - mean_pos).powi(2))
+        .sum::<f64>()
+        / weight_sum;
+
+    let stddev = variance.sqrt();
+    let agreement = (1.0 - stddev).clamp(0.0, 1.0);
+
+    TrendConfidence {
+        mean_pos,
+        agreement,
+        toward_high: mean_pos * agreement,
+        toward_low: (1.0 - mean_pos) * agreement,
+        uncertain: 1.0 - agreement,
     }
 }

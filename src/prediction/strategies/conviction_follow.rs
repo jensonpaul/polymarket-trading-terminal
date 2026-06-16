@@ -12,14 +12,14 @@
 //! ## What drives the signal
 //!
 //! | Dimension               | Role in this strategy                              |
-//! |-------------------------|----------------------------------------------------|
-//! | `side`                  | We trade the token that matches BTC's direction    |
-//! | `efficiency_ratio`      | High ER → clean trend → follow with conviction     |
-//! | `momentum_persistence`  | High persistence → trend has been sustained        |
-//! | `avg_distance`          | Large time-averaged move → crowd already committed |
-//! | `acceleration`          | Positive acceleration → trend accelerating → entry timing |
-//! | `volatility_30s`        | Very high vol may indicate chop disguised as trend |
-//! | `z_score`               | Extreme z in trend direction → strong positioning  |
+//! |-------------------------|---------------------------------------------------|
+//! | `side`                  | We trade the token that matches BTC's direction   |
+//! | `efficiency_ratio`      | High ER → clean trend → follow with conviction    |
+//! | `momentum_persistence`  | High persistence → trend has been sustained       |
+//! | `avg_distance`          | Large time-averaged move → crowd already committed|
+//! | `acceleration`          | Positive acceleration → trend accelerating        |
+//! | `volatility_30s`        | Very high vol may indicate chop disguised as trend|
+//! | `z_score`               | Extreme z in trend direction → strong positioning |
 
 use rust_decimal::prelude::ToPrimitive;
 
@@ -49,18 +49,27 @@ impl PredictionStrategy for ConvictionFollowStrategy {
     fn evaluate(
         &self,
         ctx: &PredictionContext,
-    ) -> Option<PredictionSignal> {
-        // BTC origin must be locked.
-        let trend = MarketAnalyzer::btc_trend(ctx)?;
+    ) -> PredictionSignal {
+        let name = self.name();
 
-        let elapsed =
-            300u64.saturating_sub(ctx.seconds_remaining) as f64;
+        let Some(trend) = MarketAnalyzer::btc_trend(ctx) else {
+            return PredictionSignal::no_trade(
+                name,
+                "waiting: btc origin not locked",
+                ctx.timestamp_ms,
+            );
+        };
 
-        // Token on the same side as BTC's trend.
+        let elapsed = 300u64.saturating_sub(ctx.seconds_remaining) as f64;
         let target_side = trend.side;
 
-        let token_trend =
-            MarketAnalyzer::token_trend(ctx, target_side, elapsed)?;
+        let Some(token_trend) = MarketAnalyzer::token_trend(ctx, target_side, elapsed) else {
+            return PredictionSignal::no_trade(
+                name,
+                "waiting: token origin not locked",
+                ctx.timestamp_ms,
+            );
+        };
 
         let target_token = match target_side {
             PredictionSide::Up => &ctx.polymarket.up,
@@ -69,7 +78,11 @@ impl PredictionStrategy for ConvictionFollowStrategy {
 
         let entry = target_token.current_price;
         if entry.is_zero() {
-            return None;
+            return PredictionSignal::no_trade(
+                name,
+                "waiting: token price is zero",
+                ctx.timestamp_ms,
+            );
         }
 
         let reason = format!(
@@ -100,7 +113,8 @@ impl PredictionStrategy for ConvictionFollowStrategy {
             entry.to_f64().unwrap_or(0.0),
         );
 
-        Some(PredictionSignal {
+        PredictionSignal {
+            strategy_name: name,
             signal_type: SignalType::Buy,
             side: target_side,
             confidence: 0.0,
@@ -109,6 +123,6 @@ impl PredictionStrategy for ConvictionFollowStrategy {
             stop_loss: entry,
             generated_at_ms: ctx.timestamp_ms,
             reason,
-        })
+        }
     }
 }

@@ -15,6 +15,9 @@ pub enum SignalType {
 
 #[derive(Debug, Clone)]
 pub struct PredictionSignal {
+    /// Name of the strategy that produced this signal.
+    pub strategy_name: &'static str,
+
     pub signal_type: SignalType,
 
     pub side: PredictionSide,
@@ -38,10 +41,12 @@ pub struct PredictionSignal {
 
 impl PredictionSignal {
     pub fn no_trade(
+        strategy_name: &'static str,
         reason: impl Into<String>,
         generated_at_ms: u64,
     ) -> Self {
         Self {
+            strategy_name,
             signal_type: SignalType::NoTrade,
             side: PredictionSide::Up,
             confidence: 0.0,

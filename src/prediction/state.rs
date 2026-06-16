@@ -7,10 +7,13 @@ use crate::prediction::{BtcFeatures, signals::PredictionSignal};
 
 #[derive(Clone, Debug, Default)]
 pub struct PredictionState {
-    pub active_signal: Option<PredictionSignal>,
+    /// One signal per strategy that fired this cycle.  Empty means no
+    /// strategy produced a signal (or the state was cleared / not yet
+    /// populated).
+    pub signals: Vec<PredictionSignal>,
     pub last_updated_ms: u64,
     /// Latest BTC snapshot for this window — updated every poll cycle
-    /// regardless of whether a signal is emitted.
+    /// regardless of whether any signals are emitted.
     pub btc: Option<BtcFeatures>,
 }
 
@@ -31,24 +34,25 @@ impl PredictionStore {
         }
     }
 
-    pub fn update_signal(
+    /// Replace the full signal set for this window.
+    pub fn update_signals(
         &self,
         window_ts: u64,
-        signal: PredictionSignal,
+        signals: Vec<PredictionSignal>,
         btc: BtcFeatures,
         now_ms: u64,
     ) {
         self.signals.insert(
             window_ts,
             PredictionState {
-                active_signal: Some(signal),
+                signals,
                 last_updated_ms: now_ms,
                 btc: Some(btc),
             },
         );
     }
 
-    /// Update BTC metrics without changing the active signal.
+    /// Update BTC metrics without changing the active signals.
     pub fn update_btc(
         &self,
         window_ts: u64,
@@ -62,13 +66,14 @@ impl PredictionStore {
                 s.last_updated_ms = now_ms;
             })
             .or_insert_with(|| PredictionState {
-                active_signal: None,
+                signals: Vec::new(),
                 last_updated_ms: now_ms,
                 btc: Some(btc),
             });
     }
 
-    pub fn clear_signal(
+    /// Clear all signals for a window (stale eviction).
+    pub fn clear_signals(
         &self,
         window_ts: u64,
         now_ms: u64,
@@ -76,11 +81,11 @@ impl PredictionStore {
         self.signals
             .entry(window_ts)
             .and_modify(|s| {
-                s.active_signal = None;
+                s.signals.clear();
                 s.last_updated_ms = now_ms;
             })
             .or_insert_with(|| PredictionState {
-                active_signal: None,
+                signals: Vec::new(),
                 last_updated_ms: now_ms,
                 btc: None,
             });

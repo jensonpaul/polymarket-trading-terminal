@@ -184,54 +184,95 @@ impl PolymarketDashboardApp {
                 }
 
                 // ----------------------------------------------------------------
-                // Prediction information
+                // Strategy signals
                 // ----------------------------------------------------------------
                 if let Some(pred) =
                     self.prediction_state.signals.get(&window.timestamp_5m)
                 {
-                    if let Some(signal) =
-                        pred.active_signal.as_ref()
-                    {
+                    if !pred.signals.is_empty() {
                         ui.add_space(6.0);
 
-                        panel_frame().show(ui, |ui| {
-                            ui.horizontal_wrapped(|ui| {
-                                ui.label(
-                                    format!(
-                                        "PREDICTION: {:?}",
-                                        signal.side
-                                    )
-                                );
+                        ui.columns(4, |cols| {
+                            for (col, signal) in cols.iter_mut().zip(pred.signals.iter()) {
+                                use crate::prediction::signals::{PredictionSide, SignalType};
 
-                                ui.separator();
+                                let (side_label, side_color) = match signal.signal_type {
+                                    SignalType::NoTrade => (
+                                        "NO TRADE",
+                                        Theme::TEXT_MUTED,
+                                    ),
+                                    _ => match signal.side {
+                                        PredictionSide::Up => ("▲ UP", Theme::BUY_GREEN),
+                                        PredictionSide::Down => ("▼ DOWN", Theme::SELL_RED),
+                                    },
+                                };
 
-                                ui.label(
-                                    format!(
-                                        "CONF {:.1}%",
-                                        signal.confidence
-                                    )
-                                );
+                                panel_frame().show(col, |ui| {
+                                    ui.horizontal_wrapped(|ui| {
+                                        // Strategy name badge
+                                        ui.label(
+                                            egui::RichText::new(signal.strategy_name.to_uppercase())
+                                                .monospace()
+                                                .strong()
+                                                .color(Theme::BLUE),
+                                        );
 
-                                ui.separator();
+                                        ui.separator();
 
-                                ui.label(
-                                    format!(
-                                        "ENTRY {}",
-                                        signal.target_entry
-                                    )
-                                );
+                                        // Side
+                                        ui.label(
+                                            egui::RichText::new(side_label)
+                                                .monospace()
+                                                .strong()
+                                                .color(side_color),
+                                        );
 
-                                ui.separator();
+                                        ui.separator();
 
-                                ui.label(
-                                    format!(
-                                        "EXIT {}",
-                                        signal.target_exit
-                                    )
-                                );
-                            });
+                                        // Confidence (omit when zero — strategy has no model yet)
+                                        if signal.confidence > 0.0 {
+                                            ui.label(
+                                                egui::RichText::new(format!(
+                                                    "CONF {:.1}%",
+                                                    signal.confidence * 100.0,
+                                                ))
+                                                .monospace()
+                                                .color(Theme::TEXT_PRIMARY),
+                                            );
 
-                            ui.label(&signal.reason);
+                                            ui.separator();
+                                        }
+
+                                        // Entry price
+                                        if !signal.target_entry.is_zero() {
+                                            ui.label(
+                                                egui::RichText::new(format!(
+                                                    "ENTRY {}",
+                                                    signal.target_entry,
+                                                ))
+                                                .monospace()
+                                                .color(Theme::TEXT_PRIMARY),
+                                            );
+                                        }
+                                    });
+
+                                    /*
+                                    // Reason — full width, muted
+                                    ui.label(
+                                        egui::RichText::new(&signal.reason)
+                                            .monospace()
+                                            .small()
+                                            .color(Theme::TEXT_MUTED),
+                                    );
+                                    */
+                                    ui.label(
+                                        egui::RichText::new(&signal.reason)
+                                            .monospace()
+                                            .strong()
+                                            .color(Theme::TEXT_PRIMARY),
+                                    );
+                                });
+                            }
                         });
                     }
                 }

@@ -30,31 +30,16 @@ impl PredictionEngine {
         self.strategies.push(Box::new(strategy));
     }
 
+    /// Run every registered strategy and return one signal per strategy.
+    /// Signals are pre-tagged with `strategy_name` by the strategy itself.
+    /// NoTrade signals are included — every strategy is always represented.
     pub fn evaluate(
         &self,
         ctx: &PredictionContext,
     ) -> Vec<PredictionSignal> {
-        let mut signals = Vec::new();
-
-        for strategy in &self.strategies {
-            if let Some(signal) = strategy.evaluate(ctx) {
-                signals.push(signal);
-            }
-        }
-
-        signals
-    }
-
-    pub fn evaluate_best(
-        &self,
-        ctx: &PredictionContext,
-    ) -> Option<PredictionSignal> {
-        self.evaluate(ctx)
-            .into_iter()
-            .max_by(|a, b| {
-                a.confidence
-                    .partial_cmp(&b.confidence)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
+        self.strategies
+            .iter()
+            .map(|strategy| strategy.evaluate(ctx))
+            .collect()
     }
 }
