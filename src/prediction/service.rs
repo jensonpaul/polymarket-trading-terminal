@@ -25,6 +25,7 @@ use crate::{
             ConvictionFollowStrategy,
             ExternalBtcStrategy,
             TrendStrengthStrategy,
+            MeanReversionStrategy,
         },
         WindowState,
     },
@@ -223,6 +224,7 @@ impl PredictionService {
         self.engine.register(HypeReversionStrategy::new());
         self.engine.register(ExternalBtcStrategy::new());
         self.engine.register(TrendStrengthStrategy::new());
+        self.engine.register(MeanReversionStrategy::new());
 
         // ── BTC feed task ─────────────────────────────────────────────────────
         let btc_feed = Arc::clone(&self.btc_feed);
@@ -335,6 +337,14 @@ impl PredictionService {
                 (guard.raw.clone(), guard.conviction.clone(), guard.trend_strength.clone())
             };
 
+            // ── Read latest reversion-engine output (lock-free) ───────────
+            //
+            // `reversion_output` is an `Arc<ArcSwap<Option<ReversionOutput>>>`
+            // written by `BtcFeed::run_engine()` on every raw tick. `.load()`
+            // is a cheap atomic pointer read — no lock contention with the
+            // feed task's hot path.
+            let reversion = (**self.btc_feed.reversion_output().load()).clone();
+
             let prediction_ctx = PredictionContext {
                 timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
                 btc,
@@ -343,6 +353,7 @@ impl PredictionService {
                 external_prediction,
                 conviction,
                 trend_strength,
+                reversion,
             };
 
             // ── Run all strategies — always one signal per strategy ──────

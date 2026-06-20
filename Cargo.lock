@@ -4966,6 +4966,7 @@ dependencies = [
  "rust_decimal_macros",
  "serde",
  "serde_json",
+ "thiserror 1.0.69",
  "tokio",
  "tracing",
  "tracing-subscriber",

@@ -1,4 +1,4 @@
-//! BTC price feed — orderly library consumer + 4-layer cleaning pipeline.
+//! BTC price feed — orderly library consumer + dual downstream pipelines.
 //!
 //! ## Architecture
 //!
@@ -7,10 +7,27 @@
 //!         │
 //!   out_tick_to_exchange_ticks()   ← converts OutTick → ExchangeTick per exchange
 //!         │
-//!   Pipeline::ingest()             ← 4-layer noise filter
-//!         │  (fires once per 250 ms bucket)
-//!   BtcSample (clean price) → RollingWindow + WindowState
+//!         ├──────────────────────────────────┬─────────────────────────────────┐
+//!         │                                   │                                 │
+//!   Pipeline::ingest()                ReversionEngine::on_raw_tick()    (future: order-flow / depth consumers)
+//!   ← 4-layer noise filter            ← consumes RAW, noisy ticks
+//!   (fires once per 250 ms bucket)    (fires on every tick — no smoothing)
+//!         │                                   │
+//!   BtcSample (clean price)           ReversionOutput (stretch, multi-level
+//!   → RollingWindow + WindowState       targets, half-life, regime, etc.)
 //! ```
+//!
+//! ## Why the reversion engine sees raw ticks
+//!
+//! The 4-layer cleaning pipeline (spike filter → outlier gate → aggregator →
+//! Kalman smoother) exists to produce a *smooth* trend signal for the ONNX
+//! direction model. Mean-reversion detection needs the opposite: the
+//! micro-structure noise, volatility bursts, and order-flow imbalance that
+//! the cleaning pipeline is explicitly designed to remove. Per the noisy-tick
+//! requirement, [`ReversionEngine`] is fed directly from
+//! `out_tick_to_exchange_ticks()`, in parallel with (not downstream of) the
+//! existing cleaning `Pipeline`. Both consume the same raw tick stream
+//! independently; neither blocks or alters the other.
 //!
 //! `orderly::OutTick` carries bids/asks with an `exchange` field on each
 //! `Level`, so levels are split per exchange here and one [`ExchangeTick`]
@@ -29,8 +46,8 @@ use tokio::time;
 use tracing::{error, info, warn};
 
 use crate::prediction::btc_aggregator::{Exchange, ExchangeTick, Level, Pipeline, PipelineConfig};
+use crate::prediction::reversion::{ReversionConfig, ReversionEngine, ReversionOutput};
 use crate::prediction::{BtcFeatures, BtcSample, RollingWindow, WindowState};
-use crate::state::{slug_for_ts, stamp_5m};
 
 // ── BtcSnapshot ───────────────────────────────────────────────────────────────
 
@@ -39,19 +56,25 @@ pub struct BtcSnapshot {
     pub timestamp_ms: u64,
     pub price: Decimal,
 
-    /// Most recent clean price from the pipeline (for display/debugging).
+    /// Most recent clean price from the cleaning pipeline (for display/debugging).
     pub clean: Option<crate::prediction::btc_aggregator::CleanPrice>,
 }
 
 pub type SharedBtcSnapshot = Arc<ArcSwap<BtcSnapshot>>;
 
+/// Most recent reversion-engine output, published independently of the
+/// clean-price snapshot above. `None` until the reversion engine has
+/// completed its warm-up period.
+pub type SharedReversionOutput = Arc<ArcSwap<Option<ReversionOutput>>>;
+
 // ── BtcFeed ───────────────────────────────────────────────────────────────────
 
 pub struct BtcFeed {
-    symbol:       String,
-    window:       Arc<RwLock<RollingWindow<BtcSample>>>,
-    snapshot:     SharedBtcSnapshot,
-    window_state: Arc<RwLock<WindowState>>,
+    symbol:           String,
+    window:           Arc<RwLock<RollingWindow<BtcSample>>>,
+    snapshot:         SharedBtcSnapshot,
+    window_state:     Arc<RwLock<WindowState>>,
+    reversion_output: SharedReversionOutput,
 }
 
 impl BtcFeed {
@@ -67,11 +90,20 @@ impl BtcFeed {
             window: Arc::new(RwLock::new(RollingWindow::new(
                 Duration::from_secs(60 * 60),
             ))),
+            reversion_output: Arc::new(ArcSwap::from_pointee(None)),
         }
     }
 
     pub fn snapshot(&self) -> SharedBtcSnapshot {
         self.snapshot.clone()
+    }
+
+    /// Shared handle to the latest reversion-engine output.
+    ///
+    /// Cloned cheaply (it's an `Arc<ArcSwap<..>>`) and read with `.load()`.
+    /// Used by [`PredictionService`] to populate [`PredictionContext`].
+    pub fn reversion_output(&self) -> SharedReversionOutput {
+        self.reversion_output.clone()
     }
 
     pub async fn notify_window_start(&self, window_started_ms: u64) {
@@ -93,34 +125,69 @@ impl BtcFeed {
     }
 
     /// Start the orderly engine for our symbol and consume ticks until the
-    /// watch channel closes or the engine errors.  A fresh pipeline is
-    /// created on every call so state resets cleanly on restart.
+    /// watch channel closes or the engine errors.  Fresh pipelines (both
+    /// the cleaning pipeline and the reversion engine) are created on every
+    /// call so state resets cleanly on restart.
     async fn run_engine(&self) -> anyhow::Result<()> {
         let engine = OrderlyEngine::new(self.symbol.clone());
         let (handle, mut rx) = engine.start().await?;
         info!("btc orderly engine started for {}", self.symbol);
 
         let mut pipeline = Pipeline::new(PipelineConfig::default());
+        let mut reversion = ReversionEngine::new(ReversionConfig::default())
+            .expect("default ReversionConfig must validate");
+
+        let mut staleness_check = time::interval(Duration::from_secs(1));
 
         loop {
-            // Wait for the next merged book tick.
-            if rx.changed().await.is_err() {
-                // All senders dropped — engine has shut down.
-                break;
-            }
+            tokio::select! {
+                // ── Primary path: new merged book tick ──────────────────────
+                changed = rx.changed() => {
+                    if changed.is_err() {
+                        // All senders dropped — engine has shut down.
+                        break;
+                    }
 
-            let tick: OutTick = rx.borrow().clone();
+                    let tick: OutTick = rx.borrow().clone();
 
-            if tick.bids.is_empty() || tick.asks.is_empty() {
-                continue;
-            }
+                    if tick.bids.is_empty() || tick.asks.is_empty() {
+                        continue;
+                    }
 
-            let received_ms = chrono::Utc::now().timestamp_millis() as u64;
-            let exchange_ticks = out_tick_to_exchange_ticks(&tick, received_ms);
+                    let received_ms = chrono::Utc::now().timestamp_millis() as u64;
+                    let exchange_ticks = out_tick_to_exchange_ticks(&tick, received_ms);
 
-            for ex_tick in &exchange_ticks {
-                if let Some(clean) = pipeline.ingest(ex_tick) {
-                    self.publish_clean(clean, received_ms).await;
+                    for ex_tick in &exchange_ticks {
+                        // ── Reversion engine: RAW, noisy tick — no filtering ──
+                        //
+                        // Runs independently of (in parallel with) the cleaning
+                        // pipeline below. Every tick is fed; the reversion
+                        // engine does its own internal smoothing (EWMA blend
+                        // equilibrium) rather than relying on the spike/outlier
+                        // gates designed for the trend model.
+                        if let Some(output) = reversion.on_raw_tick(ex_tick, received_ms) {
+                            self.reversion_output.store(Arc::new(Some(output)));
+                        }
+
+                        // ── Cleaning pipeline: filtered, bucketed, smoothed ──
+                        if let Some(clean) = pipeline.ingest(ex_tick) {
+                            self.publish_clean(clean, received_ms).await;
+                        }
+                    }
+                }
+
+                // ── Secondary path: staleness watchdog ──────────────────────
+                //
+                // The reversion engine needs to detect feed silence even when
+                // no new ticks are arriving (the primary select branch above
+                // only fires on tick arrival). This interval lets it notice
+                // a stalled feed and flip into `Stale` lifecycle, after which
+                // `current()` callers see a clearly degraded confidence via
+                // `data_quality` rather than a silently frozen output.
+                _ = staleness_check.tick() => {
+                    if reversion.check_staleness() {
+                        warn!("reversion engine: feed stale (no ticks within threshold)");
+                    }
                 }
             }
         }
@@ -299,9 +366,9 @@ impl BtcFeed {
 /// Split an [`OutTick`] into one [`ExchangeTick`] per exchange.
 ///
 /// Each `orderly::Level` carries an `exchange` field.  Levels are bucketed
-/// by exchange and one [`ExchangeTick`] is emitted per group so the pipeline
-/// can apply independent per-exchange spike filtering — exactly as the
-/// previous gRPC path did.
+/// by exchange and one [`ExchangeTick`] is emitted per group so both
+/// downstream pipelines (cleaning + reversion) can apply independent
+/// per-exchange logic — exactly as the previous gRPC path did.
 fn out_tick_to_exchange_ticks(tick: &OutTick, received_ms: u64) -> Vec<ExchangeTick> {
     let mut bid_map: HashMap<Exchange, Vec<Level>> = HashMap::new();
     let mut ask_map: HashMap<Exchange, Vec<Level>> = HashMap::new();

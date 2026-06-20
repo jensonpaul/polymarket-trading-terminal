@@ -192,7 +192,7 @@ impl PolymarketDashboardApp {
                     if !pred.signals.is_empty() {
                         ui.add_space(6.0);
 
-                        ui.columns(4, |cols| {
+                        ui.columns(5, |cols| {
                             for (col, signal) in cols.iter_mut().zip(pred.signals.iter()) {
                                 use crate::prediction::signals::{PredictionSide, SignalType};
 

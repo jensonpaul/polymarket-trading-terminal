@@ -5,6 +5,7 @@ pub mod context;
 pub mod engine;
 pub mod features;
 pub mod polymarket_feed;
+pub mod reversion;
 pub mod samples;
 pub mod service;
 pub mod signals;

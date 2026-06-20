@@ -6,6 +6,7 @@ use crate::prediction::features::{
     BtcFeatures,
     PolymarketFeatures,
 };
+use crate::prediction::reversion::ReversionOutput;
 
 #[derive(Debug, Clone, Default)]
 pub struct PredictionContext {
@@ -28,4 +29,10 @@ pub struct PredictionContext {
     /// derived from the same raw model output by TrendStrengthDetector.
     /// Runs parallel to `conviction` — neither reads nor alters the other.
     pub trend_strength: Option<TrendStrengthSnapshot>,
+
+    /// Latest mean-reversion probability engine output, computed from raw
+    /// (pre-cleaning-pipeline) BTC ticks. `None` until the reversion engine
+    /// has completed its warm-up period or if the feed has gone stale.
+    /// See `prediction::reversion` for the full output contract.
+    pub reversion: Option<ReversionOutput>,
 }
